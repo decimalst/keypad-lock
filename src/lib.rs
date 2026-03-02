@@ -12,6 +12,7 @@
 
 #![forbid(unsafe_code)]
 
+use core::hint::black_box;
 use std::time::Duration;
 
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -33,6 +34,92 @@ pub const ALARM_DURATION: Duration = Duration::from_secs(5);
 /// MFA timeout when `acoustic_unlock` is enabled.
 #[cfg(feature = "acoustic_unlock")]
 pub const MFA_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Max number of actions emitted by any single transition.
+pub const MAX_ACTIONS: usize = 4;
+
+/// Fixed-capacity action buffer (zero-allocation).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Actions<const N: usize> {
+    buf: [Option<Action>; N],
+    len: usize,
+}
+
+impl<const N: usize> Default for Actions<N> {
+    fn default() -> Self {
+        Self {
+            buf: core::array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+}
+
+impl<const N: usize> Actions<N> {
+    pub fn push(&mut self, a: Action) -> bool {
+        if self.len < N {
+            self.buf[self.len] = Some(a);
+            self.len += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Action> {
+        self.buf[..self.len].iter().filter_map(|x| x.as_ref())
+    }
+}
+
+impl<const N: usize> IntoIterator for Actions<N> {
+    type Item = Action;
+    type IntoIter = core::iter::FilterMap<
+        core::array::IntoIter<Option<Action>, N>,
+        fn(Option<Action>) -> Option<Action>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn keep(x: Option<Action>) -> Option<Action> {
+            x
+        }
+        self.buf.into_iter().filter_map(keep as fn(_) -> _)
+    }
+}
+
+impl<'a, const N: usize> IntoIterator for &'a Actions<N> {
+    type Item = &'a Action;
+    type IntoIter = core::iter::FilterMap<
+        core::slice::Iter<'a, Option<Action>>,
+        fn(&'a Option<Action>) -> Option<&'a Action>,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        fn keep<'a>(x: &'a Option<Action>) -> Option<&'a Action> {
+            x.as_ref()
+        }
+        self.buf[..self.len].iter().filter_map(keep as fn(_) -> _)
+    }
+}
+
+macro_rules! actions {
+    () => {
+        Actions::<MAX_ACTIONS>::default()
+    };
+    ($($a:expr),+ $(,)?) => {{
+        let mut out = Actions::<MAX_ACTIONS>::default();
+        $(
+            let _ = out.push($a);
+        )+
+        out
+    }};
+}
 
 /// A single keypad digit (0-9).
 ///
@@ -131,22 +218,24 @@ impl PasscodeBuffer {
     /// Constant-time equality of digits + length.
     ///
     /// This runs a fixed number of iterations (always `MAX_PASSCODE_LEN`).
+    ///
+    /// Hardening: `black_box` discourages LLVM from proving facts about `diff`
+    /// and “helpfully” reintroducing data-dependent early-exit behavior.
     fn constant_time_eq(&self, other: &Self) -> bool {
         let mut diff: u8 = 0;
 
         for i in 0..MAX_PASSCODE_LEN {
             diff |= self.digits[i] ^ other.digits[i];
+            diff = black_box(diff);
         }
 
         diff |= self.len ^ other.len;
+        diff = black_box(diff);
 
-        diff == 0
+        black_box(diff) == 0
     }
 
     /// Branchless digit + length compare, requiring non-empty input.
-    ///
-    /// Note: For strong cross-platform constant-time guarantees across optimizers,
-    /// consider a vetted crate (e.g., `subtle`), but this is a solid baseline.
     pub fn matches(&self, other: &Self) -> bool {
         let eq = self.constant_time_eq(other);
         let non_empty = self.len != 0;
@@ -222,8 +311,12 @@ pub enum SecurityState {
     #[cfg(feature = "acoustic_unlock")]
     PendingAudio { passcode: PasscodeBuffer, elapsed: Duration },
 
-    /// Door is unlocked temporarily.
-    Unlocked { passcode: PasscodeBuffer, elapsed: Duration },
+    /// Door is unlocked temporarily (tracks door physical state to avoid “locking open”).
+    Unlocked {
+        passcode: PasscodeBuffer,
+        elapsed: Duration,
+        door: DoorPhysicalState,
+    },
 
     /// Alarm state.
     Alarm { passcode: PasscodeBuffer, elapsed: Duration },
@@ -238,18 +331,6 @@ impl Default for SecurityState {
 }
 
 /// A compact, validation-friendly snapshot of durable state for NVRAM persistence.
-///
-/// Why this exists:
-/// - Power loss should not implicitly revert the system to `Setup` if a passcode was already configured.
-/// - Embedded deployments often store a small, fixed-size record in EEPROM/flash.
-///
-/// Notes:
-/// - We intentionally do **not** persist the in-progress `guess` buffer.
-/// - We store elapsed time in milliseconds with saturation to avoid overflow.
-/// - A version byte allows forward-compatible migrations.
-///
-/// This struct is designed to be trivially serializable (e.g. via postcard/bincode), but you
-/// can also write it to EEPROM as a fixed-size record.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PersistedState {
     pub version: u8,
@@ -287,12 +368,16 @@ impl PersistedPasscode {
         if !self.validate() {
             return None;
         }
+
         let mut buf = PasscodeBuffer::default();
-        for i in 0..(self.len as usize) {
-            // Safe due to validate()
-            let d = Digit(self.digits[i]);
+        let limit = MAX_PASSCODE_LEN.min(self.len as usize);
+
+        for i in 0..limit {
+            let v = *self.digits.get(i)?;
+            let d = Digit::new(v)?;
             buf.push(d);
         }
+
         Some(buf)
     }
 
@@ -317,8 +402,6 @@ impl PersistedState {
 
 impl SecurityState {
     /// Create a persistence snapshot suitable for writing to EEPROM/NVRAM.
-    ///
-    /// Call this *outside* the FSM after processing an event batch.
     #[must_use]
     pub fn snapshot(&self) -> PersistedState {
         let (mode, passcode, failed_attempts, elapsed) = match self {
@@ -351,7 +434,7 @@ impl SecurityState {
                 0,
                 *elapsed,
             ),
-            SecurityState::Unlocked { passcode, elapsed } => (
+            SecurityState::Unlocked { passcode, elapsed, .. } => (
                 PersistedMode::Unlocked,
                 PersistedPasscode::from_buffer(passcode),
                 0,
@@ -365,9 +448,7 @@ impl SecurityState {
             ),
         };
 
-        let elapsed_ms = elapsed
-            .as_millis()
-            .min(u32::MAX as u128) as u32;
+        let elapsed_ms = elapsed.as_millis().min(u32::MAX as u128) as u32;
 
         PersistedState {
             version: PersistedState::VERSION,
@@ -377,10 +458,16 @@ impl SecurityState {
             elapsed_ms,
         }
     }
+    /// Restore *and* immediately prime the FSM with the current physical door state.
+    ///
+    /// Callers should apply the returned actions before emitting TimerTick.
+    pub fn restore_primed(snapshot: PersistedState, door_now: DoorPhysicalState) -> Option<(Self, Actions<MAX_ACTIONS>)> {
+        let state = Self::restore(snapshot)?;
+        let (next, acts) = state.next(Event::DoorSensorChanged(door_now));
+        Some((next, acts))
+    }
 
     /// Restore from a persisted snapshot.
-    ///
-    /// If the snapshot is invalid/corrupt, returns `None` so the caller can `unwrap_or_default()`.
     pub fn restore(snapshot: PersistedState) -> Option<Self> {
         if !snapshot.validate() {
             return None;
@@ -399,7 +486,11 @@ impl SecurityState {
             PersistedMode::Lockout => SecurityState::Lockout { passcode, elapsed },
             #[cfg(feature = "acoustic_unlock")]
             PersistedMode::PendingAudio => SecurityState::PendingAudio { passcode, elapsed },
-            PersistedMode::Unlocked => SecurityState::Unlocked { passcode, elapsed },
+            PersistedMode::Unlocked => SecurityState::Unlocked {
+                passcode,
+                elapsed,
+                door: DoorPhysicalState::Closed, // best-effort default; will correct on next sensor event
+            },
             PersistedMode::Alarm => SecurityState::Alarm { passcode, elapsed },
         };
 
@@ -407,9 +498,7 @@ impl SecurityState {
     }
 }
 
-
 fn add_duration_saturating(a: Duration, b: Duration) -> Duration {
-    // Hardening: prevent panic on overflow in adversarial / fuzz scenarios.
     a.checked_add(b).unwrap_or(Duration::MAX)
 }
 
@@ -418,7 +507,7 @@ impl SecurityState {
     ///
     /// Returns the next state plus the `Action`s required to make hardware match the new state.
     #[must_use]
-    pub fn next(self, event: Event) -> (Self, Vec<Action>) {
+    pub fn next(self, event: Event) -> (Self, Actions<MAX_ACTIONS>) {
         use Event::*;
         use SecurityState::*;
 
@@ -427,30 +516,37 @@ impl SecurityState {
             (Setup { mut buffer }, Keypress(d)) => {
                 buffer.push(d);
                 let len = buffer.len();
-                (Setup { buffer }, vec![Action::UpdateDisplayLen(len)])
+                (Setup { buffer }, actions![Action::UpdateDisplayLen(len)])
             }
             (Setup { mut buffer }, Clear) => {
                 buffer.clear();
-                (Setup { buffer }, vec![Action::UpdateDisplayLen(0)])
+                (Setup { buffer }, actions![Action::UpdateDisplayLen(0)])
             }
             (Setup { buffer }, Enter) if buffer.len() >= MIN_PASSCODE_LEN => {
-                let actions = vec![Action::UpdateDisplayLen(0), Action::SetDoorLock(true)];
                 (
                     Locked {
                         passcode: buffer,
                         guess: PasscodeBuffer::default(),
                         failed_attempts: 0,
                     },
-                    actions,
+                    actions![Action::UpdateDisplayLen(0), Action::SetDoorLock(true)],
                 )
             }
+            (Setup { buffer }, Enter) => (Setup { buffer }, actions![]),
+            (Setup { buffer }, TimerTick(_)) => (Setup { buffer }, actions![]),
+            (Setup { buffer }, DoorSensorChanged(_)) => (Setup { buffer }, actions![]),
+            #[cfg(feature = "acoustic_unlock")]
+            (Setup { buffer }, AudioFrequency(_)) => (Setup { buffer }, actions![]),
 
             // --- MODE 2: LOCKED ---
-            (Locked {
-                passcode,
-                mut guess,
-                failed_attempts,
-            }, Keypress(d)) => {
+            (
+                Locked {
+                    passcode,
+                    mut guess,
+                    failed_attempts,
+                },
+                Keypress(d),
+            ) => {
                 guess.push(d);
                 let len = guess.len();
                 (
@@ -459,14 +555,17 @@ impl SecurityState {
                         guess,
                         failed_attempts,
                     },
-                    vec![Action::UpdateDisplayLen(len)],
+                    actions![Action::UpdateDisplayLen(len)],
                 )
             }
-            (Locked {
-                passcode,
-                mut guess,
-                failed_attempts,
-            }, Clear) => {
+            (
+                Locked {
+                    passcode,
+                    mut guess,
+                    failed_attempts,
+                },
+                Clear,
+            ) => {
                 guess.clear();
                 (
                     Locked {
@@ -474,16 +573,18 @@ impl SecurityState {
                         guess,
                         failed_attempts,
                     },
-                    vec![Action::UpdateDisplayLen(0)],
+                    actions![Action::UpdateDisplayLen(0)],
                 )
             }
-            (Locked {
-                passcode,
-                mut guess,
-                failed_attempts,
-            }, Enter) => {
+            (
+                Locked {
+                    passcode,
+                    mut guess,
+                    failed_attempts,
+                },
+                Enter,
+            ) => {
                 // Usability hardening: don't count empty submits as a failed attempt.
-                // This avoids a trivial DoS-by-spam-Enter lockout.
                 if guess.is_empty() {
                     return (
                         Locked {
@@ -491,7 +592,7 @@ impl SecurityState {
                             guess,
                             failed_attempts,
                         },
-                        vec![Action::UpdateDisplayLen(0)],
+                        actions![Action::UpdateDisplayLen(0)],
                     );
                 }
 
@@ -506,7 +607,7 @@ impl SecurityState {
                                 passcode,
                                 elapsed: Duration::ZERO,
                             },
-                            vec![Action::UpdateDisplayLen(0), Action::SetDoorLock(true)],
+                            actions![Action::UpdateDisplayLen(0), Action::SetDoorLock(true)],
                         )
                     }
 
@@ -516,8 +617,9 @@ impl SecurityState {
                             Unlocked {
                                 passcode,
                                 elapsed: Duration::ZERO,
+                                door: DoorPhysicalState::Closed,
                             },
-                            vec![Action::SetDoorLock(false), Action::UpdateDisplayLen(0)],
+                            actions![Action::SetDoorLock(false), Action::UpdateDisplayLen(0)],
                         )
                     }
                 } else {
@@ -529,10 +631,10 @@ impl SecurityState {
                                 passcode,
                                 elapsed: Duration::ZERO,
                             },
-                            vec![
+                            actions![
                                 Action::UpdateDisplayLen(0),
                                 Action::SoundAlarm(true),
-                                Action::SetDoorLock(true),
+                                Action::SetDoorLock(true)
                             ],
                         )
                     } else {
@@ -542,10 +644,45 @@ impl SecurityState {
                                 guess,
                                 failed_attempts: new_attempts,
                             },
-                            vec![Action::UpdateDisplayLen(0)],
+                            actions![Action::UpdateDisplayLen(0)],
                         )
                     }
                 }
+            }
+            (
+                Locked {
+                    passcode,
+                    mut guess,
+                    failed_attempts: _,
+                },
+                DoorSensorChanged(DoorPhysicalState::Open),
+            ) => {
+                // Treat "door opened while we believe we're secured" as intrusion -> Alarm.
+                guess.clear();
+                (
+                    Alarm {
+                        passcode,
+                        elapsed: Duration::ZERO,
+                    },
+                    actions![
+                        Action::SoundAlarm(true),
+                        Action::SetDoorLock(true),
+                        Action::UpdateDisplayLen(0)
+                    ],
+                )
+            }
+            (Locked { passcode, guess, failed_attempts }, DoorSensorChanged(DoorPhysicalState::Closed)) => {
+                (
+                    Locked { passcode, guess, failed_attempts },
+                    actions![]
+                )
+            }
+            (Locked { passcode, guess, failed_attempts }, TimerTick(_)) => {
+                (Locked { passcode, guess, failed_attempts }, actions![])
+            }
+            #[cfg(feature = "acoustic_unlock")]
+            (Locked { passcode, guess, failed_attempts }, AudioFrequency(_)) => {
+                (Locked { passcode, guess, failed_attempts }, actions![])
             }
 
             // --- MODE 3: LOCKOUT (Anti-Brute Force) ---
@@ -558,23 +695,37 @@ impl SecurityState {
                             guess: PasscodeBuffer::default(),
                             failed_attempts: 0,
                         },
-                        vec![
+                        actions![
                             Action::SoundAlarm(false),
                             Action::SetDoorLock(true),
-                            Action::UpdateDisplayLen(0),
+                            Action::UpdateDisplayLen(0)
                         ],
                     )
                 } else {
-                    // Idempotent assertions during lockout.
                     (
                         Lockout {
                             passcode,
                             elapsed: new_elapsed,
                         },
-                        vec![Action::SoundAlarm(true), Action::SetDoorLock(true)],
+                        actions![Action::SoundAlarm(true), Action::SetDoorLock(true)],
                     )
                 }
             }
+            (Lockout { passcode, elapsed }, DoorSensorChanged(DoorPhysicalState::Open)) => {
+                // Stay in lockout but assert secure posture.
+                (
+                    Lockout { passcode, elapsed },
+                    actions![Action::SoundAlarm(true), Action::SetDoorLock(true)],
+                )
+            }
+            (Lockout { passcode, elapsed }, DoorSensorChanged(DoorPhysicalState::Closed)) => {
+                (Lockout { passcode, elapsed }, actions![])
+            }
+            (Lockout { passcode, elapsed }, Keypress(_)) => (Lockout { passcode, elapsed }, actions![]),
+            (Lockout { passcode, elapsed }, Enter) => (Lockout { passcode, elapsed }, actions![]),
+            (Lockout { passcode, elapsed }, Clear) => (Lockout { passcode, elapsed }, actions![]),
+            #[cfg(feature = "acoustic_unlock")]
+            (Lockout { passcode, elapsed }, AudioFrequency(_)) => (Lockout { passcode, elapsed }, actions![]),
 
             // --- MODE 4: PENDING AUDIO (MFA Challenge) ---
             #[cfg(feature = "acoustic_unlock")]
@@ -584,8 +735,9 @@ impl SecurityState {
                         Unlocked {
                             passcode,
                             elapsed: Duration::ZERO,
+                            door: DoorPhysicalState::Closed,
                         },
-                        vec![Action::SetDoorLock(false)],
+                        actions![Action::SetDoorLock(false)],
                     )
                 } else {
                     (
@@ -593,7 +745,7 @@ impl SecurityState {
                             passcode,
                             elapsed: Duration::ZERO,
                         },
-                        vec![Action::SoundAlarm(true), Action::SetDoorLock(true)],
+                        actions![Action::SoundAlarm(true), Action::SetDoorLock(true)],
                     )
                 }
             }
@@ -607,7 +759,7 @@ impl SecurityState {
                             guess: PasscodeBuffer::default(),
                             failed_attempts: 0,
                         },
-                        vec![Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
+                        actions![Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
                     )
                 } else {
                     (
@@ -615,32 +767,85 @@ impl SecurityState {
                             passcode,
                             elapsed: new_elapsed,
                         },
-                        vec![Action::SetDoorLock(true)],
+                        actions![Action::SetDoorLock(true)],
                     )
                 }
             }
+            #[cfg(feature = "acoustic_unlock")]
+            (PendingAudio { passcode, elapsed }, DoorSensorChanged(_)) => {
+                (PendingAudio { passcode, elapsed }, actions![Action::SetDoorLock(true)])
+            }
+            #[cfg(feature = "acoustic_unlock")]
+            (PendingAudio { passcode, elapsed }, Keypress(_)) => (PendingAudio { passcode, elapsed }, actions![]),
+            #[cfg(feature = "acoustic_unlock")]
+            (PendingAudio { passcode, elapsed }, Enter) => (PendingAudio { passcode, elapsed }, actions![]),
+            #[cfg(feature = "acoustic_unlock")]
+            (PendingAudio { passcode, elapsed }, Clear) => (PendingAudio { passcode, elapsed }, actions![]),
 
             // --- MODE 5: UNLOCKED ---
-            (Unlocked { passcode, elapsed }, TimerTick(dt)) => {
+            (Unlocked { passcode, elapsed, door }, TimerTick(dt)) => {
                 let new_elapsed = add_duration_saturating(elapsed, dt);
+
                 if new_elapsed >= UNLOCKED_DURATION {
+                    match door {
+                        DoorPhysicalState::Closed => (
+                            Locked {
+                                passcode,
+                                guess: PasscodeBuffer::default(),
+                                failed_attempts: 0,
+                            },
+                            actions![Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
+                        ),
+                        DoorPhysicalState::Open => (
+                            // Door is open: do NOT fire the bolt.
+                            // Stay unlocked; latch will occur once we observe Closed.
+                            Unlocked {
+                                passcode,
+                                elapsed: UNLOCKED_DURATION,
+                                door,
+                            },
+                            actions![Action::SetDoorLock(false)],
+                        ),
+                    }
+                } else {
+                    (
+                        Unlocked {
+                            passcode,
+                            elapsed: new_elapsed,
+                            door,
+                        },
+                        actions![Action::SetDoorLock(false)],
+                    )
+                }
+            }
+            (Unlocked { passcode, elapsed, .. }, DoorSensorChanged(new_door)) => {
+                // If we've already “expired” and the door just became closed, lock immediately.
+                if elapsed >= UNLOCKED_DURATION && new_door == DoorPhysicalState::Closed {
                     (
                         Locked {
                             passcode,
                             guess: PasscodeBuffer::default(),
                             failed_attempts: 0,
                         },
-                        vec![Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
+                        actions![Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
                     )
                 } else {
                     (
                         Unlocked {
                             passcode,
-                            elapsed: new_elapsed,
+                            elapsed,
+                            door: new_door,
                         },
-                        vec![Action::SetDoorLock(false)],
+                        actions![],
                     )
                 }
+            }
+            (Unlocked { passcode, elapsed, door }, Keypress(_)) => (Unlocked { passcode, elapsed, door }, actions![]),
+            (Unlocked { passcode, elapsed, door }, Enter) => (Unlocked { passcode, elapsed, door }, actions![]),
+            (Unlocked { passcode, elapsed, door }, Clear) => (Unlocked { passcode, elapsed, door }, actions![]),
+            #[cfg(feature = "acoustic_unlock")]
+            (Unlocked { passcode, elapsed, door }, AudioFrequency(_)) => {
+                (Unlocked { passcode, elapsed, door }, actions![])
             }
 
             // --- MODE 6: ALARM ---
@@ -653,10 +858,10 @@ impl SecurityState {
                             guess: PasscodeBuffer::default(),
                             failed_attempts: 0,
                         },
-                        vec![
+                        actions![
                             Action::SoundAlarm(false),
                             Action::SetDoorLock(true),
-                            Action::UpdateDisplayLen(0),
+                            Action::UpdateDisplayLen(0)
                         ],
                     )
                 } else {
@@ -665,40 +870,18 @@ impl SecurityState {
                             passcode,
                             elapsed: new_elapsed,
                         },
-                        vec![Action::SoundAlarm(true), Action::SetDoorLock(true)],
+                        actions![Action::SoundAlarm(true), Action::SetDoorLock(true)],
                     )
                 }
             }
-
-            
-            // --- DOOR SENSOR (Physical Intrusion) ---
-            // Treat "door opened while we believe we're secured" as an intrusion -> Alarm.
-            (Locked { passcode, guess: mut guess, failed_attempts }, DoorSensorChanged(DoorPhysicalState::Open)) => {
-                // Clear any in-progress guess to reduce residual secret exposure.
-                guess.clear();
-                (
-                    Alarm { passcode, elapsed: Duration::ZERO },
-                    vec![Action::SoundAlarm(true), Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
-                )
-            }
-            (Lockout { passcode, elapsed }, DoorSensorChanged(DoorPhysicalState::Open)) => {
-                // Stay in lockout but assert secure posture.
-                (
-                    Lockout { passcode, elapsed },
-                    vec![Action::SoundAlarm(true), Action::SetDoorLock(true)],
-                )
-            }
-            (Unlocked { passcode, elapsed }, DoorSensorChanged(_)) => {
-                // Door events while unlocked are informational; no state change.
-                (Unlocked { passcode, elapsed }, vec![])
-            }
             (Alarm { passcode, elapsed }, DoorSensorChanged(_)) => {
-                // Ignore; alarm already active.
-                (Alarm { passcode, elapsed }, vec![Action::SoundAlarm(true), Action::SetDoorLock(true)])
+                (Alarm { passcode, elapsed }, actions![Action::SoundAlarm(true), Action::SetDoorLock(true)])
             }
-
-// Catch-all: drop invalid inputs (e.g., keypresses during lockout)
-            (state, _) => (state, vec![]),
+            (Alarm { passcode, elapsed }, Keypress(_)) => (Alarm { passcode, elapsed }, actions![]),
+            (Alarm { passcode, elapsed }, Enter) => (Alarm { passcode, elapsed }, actions![]),
+            (Alarm { passcode, elapsed }, Clear) => (Alarm { passcode, elapsed }, actions![]),
+            #[cfg(feature = "acoustic_unlock")]
+            (Alarm { passcode, elapsed }, AudioFrequency(_)) => (Alarm { passcode, elapsed }, actions![]),
         }
     }
 }

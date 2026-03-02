@@ -1,26 +1,44 @@
 use std::time::Duration;
 
-use keypad_lock_fsm::{Action, Digit, DoorPhysicalState, Event, PasscodeBuffer, PersistedState, SecurityState, ALARM_DURATION, LOCKOUT_DURATION, MIN_PASSCODE_LEN, UNLOCKED_DURATION};
+use keypad_lock_fsm::{
+    Action, Actions, Digit, DoorPhysicalState, Event, PasscodeBuffer, PersistedMode, PersistedPasscode,
+    PersistedState, SecurityState, ALARM_DURATION, LOCKOUT_DURATION, MAX_ACTIONS, MIN_PASSCODE_LEN,
+    UNLOCKED_DURATION,
+};
 
 fn d(v: u8) -> Digit {
     Digit::new(v).unwrap()
 }
 
+fn actions_to_vec<const N: usize>(a: Actions<N>) -> Vec<Action> {
+    a.into_iter().collect()
+}
+
+fn actions_contains<const N: usize>(actions: &Actions<N>, needle: &Action) -> bool {
+    actions.iter().any(|a| a == needle)
+}
+
+/// Feed digits + Enter, collecting all actions into a Vec for easy assertions.
 fn enter_passcode(state: SecurityState, digits: &[u8]) -> (SecurityState, Vec<Action>) {
     let mut s = state;
-    let mut all_actions = Vec::new();
+    let mut all_actions: Vec<Action> = Vec::new();
 
     for &v in digits {
         let (next, actions) = s.next(Event::Keypress(d(v)));
         s = next;
-        all_actions.extend(actions);
+        all_actions.extend(actions_to_vec(actions));
     }
 
     let (next, actions) = s.next(Event::Enter);
     s = next;
-    all_actions.extend(actions);
+    all_actions.extend(actions_to_vec(actions));
 
     (s, all_actions)
+}
+
+/// Convenience: prime door sensor with a known physical state.
+fn prime_door(state: SecurityState, door: DoorPhysicalState) -> (SecurityState, Actions<MAX_ACTIONS>) {
+    state.next(Event::DoorSensorChanged(door))
 }
 
 #[test]
@@ -82,11 +100,12 @@ fn setup_requires_min_length_before_locking() {
     state = next;
 
     assert!(matches!(state, SecurityState::Locked { .. }));
-    assert!(actions.contains(&Action::SetDoorLock(true)));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(true)));
 }
 
 #[test]
 fn empty_enter_in_locked_does_not_increment_failed_attempts() {
+    // Setup PIN: 1-2-3
     let (state, _actions) = enter_passcode(SecurityState::default(), &[1, 2, 3]);
 
     let (state, _actions) = state.next(Event::Enter);
@@ -100,36 +119,38 @@ fn empty_enter_in_locked_does_not_increment_failed_attempts() {
 }
 
 #[test]
-fn correct_pin_unlocks_and_auto_relocks() {
+fn correct_pin_unlocks_and_auto_relocks_when_door_closed() {
     // Setup PIN 1-2-3.
     let (mut state, actions) = enter_passcode(SecurityState::default(), &[1, 2, 3]);
     assert!(actions.contains(&Action::SetDoorLock(true)));
 
+    // Prime: assume door is closed (normal).
+    let (s, _acts) = prime_door(state, DoorPhysicalState::Closed);
+    state = s;
+
     // Enter correct PIN.
-    let (next, _actions) = state.next(Event::Keypress(d(1)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(2)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(3)));
-    state = next;
+    for &v in &[1u8, 2u8, 3u8] {
+        let (next, _actions) = state.next(Event::Keypress(d(v)));
+        state = next;
+    }
 
     let (next, actions) = state.next(Event::Enter);
     state = next;
 
     assert!(matches!(state, SecurityState::Unlocked { .. }));
-    assert!(actions.contains(&Action::SetDoorLock(false)));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(false)));
 
     // Tick less than UNLOCKED_DURATION -> still unlocked.
     let (next, actions) = state.next(Event::TimerTick(UNLOCKED_DURATION - Duration::from_secs(1)));
     state = next;
     assert!(matches!(state, SecurityState::Unlocked { .. }));
-    assert!(actions.contains(&Action::SetDoorLock(false)));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(false)));
 
-    // Cross the threshold -> re-lock.
+    // Cross the threshold while door is closed -> re-lock.
     let (next, actions) = state.next(Event::TimerTick(Duration::from_secs(1)));
     state = next;
     assert!(matches!(state, SecurityState::Locked { .. }));
-    assert!(actions.contains(&Action::SetDoorLock(true)));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(true)));
 }
 
 #[test]
@@ -137,14 +158,10 @@ fn wrong_pin_triggers_lockout_after_three_attempts_and_recovers() {
     let (mut state, _actions) = enter_passcode(SecurityState::default(), &[1, 2, 3]);
 
     // Attempt 1: 9-9-9
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Enter);
-    state = next;
+    for _ in 0..3 {
+        state = state.next(Event::Keypress(d(9))).0;
+    }
+    state = state.next(Event::Enter).0;
 
     match state {
         SecurityState::Locked { failed_attempts, .. } => assert_eq!(failed_attempts, 1),
@@ -152,14 +169,10 @@ fn wrong_pin_triggers_lockout_after_three_attempts_and_recovers() {
     }
 
     // Attempt 2: 9-9-9
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Enter);
-    state = next;
+    for _ in 0..3 {
+        state = state.next(Event::Keypress(d(9))).0;
+    }
+    state = state.next(Event::Enter).0;
 
     match state {
         SecurityState::Locked { failed_attempts, .. } => assert_eq!(failed_attempts, 2),
@@ -167,31 +180,28 @@ fn wrong_pin_triggers_lockout_after_three_attempts_and_recovers() {
     }
 
     // Attempt 3: 9-9-9 -> lockout
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
-    let (next, _actions) = state.next(Event::Keypress(d(9)));
-    state = next;
+    for _ in 0..3 {
+        state = state.next(Event::Keypress(d(9))).0;
+    }
     let (next, actions) = state.next(Event::Enter);
     state = next;
 
     assert!(matches!(state, SecurityState::Lockout { .. }));
-    assert!(actions.contains(&Action::SoundAlarm(true)));
+    assert!(actions_contains(&actions, &Action::SoundAlarm(true)));
 
     // Still in lockout before duration expires.
     let (next, actions) = state.next(Event::TimerTick(LOCKOUT_DURATION - Duration::from_secs(1)));
     state = next;
     assert!(matches!(state, SecurityState::Lockout { .. }));
     // Idempotent assertions during lockout.
-    assert!(actions.contains(&Action::SoundAlarm(true)));
-    assert!(actions.contains(&Action::SetDoorLock(true)));
+    assert!(actions_contains(&actions, &Action::SoundAlarm(true)));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(true)));
 
     // Cross the threshold: recover to Locked.
     let (next, actions) = state.next(Event::TimerTick(Duration::from_secs(1)));
     state = next;
     assert!(matches!(state, SecurityState::Locked { failed_attempts: 0, .. }));
-    assert!(actions.contains(&Action::SoundAlarm(false)));
+    assert!(actions_contains(&actions, &Action::SoundAlarm(false)));
 }
 
 #[test]
@@ -211,15 +221,14 @@ fn alarm_times_out_back_to_locked() {
     let (next, actions) = state.next(Event::TimerTick(ALARM_DURATION - Duration::from_secs(1)));
     state = next;
     assert!(matches!(state, SecurityState::Alarm { .. }));
-    assert!(actions.contains(&Action::SoundAlarm(true)));
+    assert!(actions_contains(&actions, &Action::SoundAlarm(true)));
 
     // Cross the threshold -> Locked.
     let (next, actions) = state.next(Event::TimerTick(Duration::from_secs(1)));
     state = next;
     assert!(matches!(state, SecurityState::Locked { .. }));
-    assert!(actions.contains(&Action::SoundAlarm(false)));
+    assert!(actions_contains(&actions, &Action::SoundAlarm(false)));
 }
-
 
 #[test]
 fn door_open_while_locked_triggers_alarm() {
@@ -230,8 +239,8 @@ fn door_open_while_locked_triggers_alarm() {
     let (state, actions) = state.next(Event::DoorSensorChanged(DoorPhysicalState::Open));
 
     assert!(matches!(state, SecurityState::Alarm { .. }));
-    assert!(actions.contains(&Action::SoundAlarm(true)));
-    assert!(actions.contains(&Action::SetDoorLock(true)));
+    assert!(actions_contains(&actions, &Action::SoundAlarm(true)));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(true)));
 }
 
 #[test]
@@ -258,19 +267,60 @@ fn persisted_snapshot_roundtrip_restores_secure_state() {
 fn corrupted_persisted_state_falls_back_to_default() {
     let mut bad = PersistedState {
         version: 99,
-        mode: keypad_lock_fsm::PersistedMode::Locked,
-        passcode: keypad_lock_fsm::PersistedPasscode { digits: [255u8; keypad_lock_fsm::MAX_PASSCODE_LEN], len: 7 },
+        mode: PersistedMode::Locked,
+        passcode: PersistedPasscode {
+            digits: [255u8; keypad_lock_fsm::MAX_PASSCODE_LEN],
+            len: 7,
+        },
         failed_attempts: 250,
         elapsed_ms: u32::MAX,
     };
 
     assert!(SecurityState::restore(bad).is_none());
 
-    // Fix version but keep invalid digits
+    // Fix version but keep invalid digits.
     bad.version = PersistedState::VERSION;
     assert!(SecurityState::restore(bad).is_none());
 }
 
+#[test]
+fn restore_is_primed_with_true_door_state_to_prevent_locking_open() {
+    // Build a persisted snapshot representing "Unlocked and expired" (elapsed >= UNLOCKED_DURATION).
+    // After restore, we MUST prime with DoorSensorChanged(Open) before TimerTick to avoid firing bolt.
+
+    let mut passcode = PasscodeBuffer::default();
+    for &v in &[1u8, 2u8, 3u8] {
+        passcode.push(d(v));
+    }
+
+    // Create a snapshot in Unlocked mode with elapsed beyond duration.
+    let snap = SecurityState::Unlocked {
+        passcode,
+        elapsed: UNLOCKED_DURATION,
+        door: DoorPhysicalState::Closed, // placeholder; restore will not persist door
+    }
+    .snapshot();
+
+    // Restore and prime with "door is actually open".
+    let (mut state, priming_actions) =
+        SecurityState::restore_primed(snap, DoorPhysicalState::Open).expect("restore_primed should work");
+
+    // Priming should *not* lock the door.
+    assert!(!actions_contains(&priming_actions, &Action::SetDoorLock(true)));
+
+    // Now, if a TimerTick arrives, the FSM should refuse to lock while open.
+    let (next, actions) = state.next(Event::TimerTick(Duration::from_secs(1)));
+    state = next;
+    assert!(matches!(state, SecurityState::Unlocked { door: DoorPhysicalState::Open, .. }));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(false)));
+    assert!(!actions_contains(&actions, &Action::SetDoorLock(true)));
+
+    // Once the door closes, we should lock immediately (because elapsed >= duration).
+    let (next, actions) = state.next(Event::DoorSensorChanged(DoorPhysicalState::Closed));
+    state = next;
+    assert!(matches!(state, SecurityState::Locked { .. }));
+    assert!(actions_contains(&actions, &Action::SetDoorLock(true)));
+}
 
 #[test]
 fn constants_are_sane() {
@@ -300,7 +350,8 @@ mod acoustic {
         assert!(matches!(state, SecurityState::PendingAudio { .. }));
 
         // Still pending before MFA timeout.
-        let (next, _actions) = state.next(Event::TimerTick(keypad_lock_fsm::MFA_TIMEOUT - Duration::from_secs(1)));
+        let (next, _actions) =
+            state.next(Event::TimerTick(keypad_lock_fsm::MFA_TIMEOUT - Duration::from_secs(1)));
         state = next;
         assert!(matches!(state, SecurityState::PendingAudio { .. }));
 
@@ -328,7 +379,7 @@ mod acoustic {
         state = next;
 
         assert!(matches!(state, SecurityState::Alarm { .. }));
-        assert!(actions.contains(&Action::SoundAlarm(true)));
-        assert!(actions.contains(&Action::SetDoorLock(true)));
+        assert!(actions_contains(&actions, &Action::SoundAlarm(true)));
+        assert!(actions_contains(&actions, &Action::SetDoorLock(true)));
     }
 }
