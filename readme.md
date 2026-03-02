@@ -4,13 +4,14 @@ A memory-safe, side-effect-free finite state machine (FSM) modeling a secure key
 
 This project demonstrates:
 
-* Type-safe digit representation
-* Bounded passcode buffers
-* Zeroized secret memory (`zeroize`)
-* Branchless passcode comparison
-* Lockout protection against brute-force attempts
-* Optional compile-time gated MFA (audio challenge)
-* Pure state transitions returning explicit hardware actions
+
+- Type-safe digit representation (`Digit`)
+- Bounded passcode buffers (`PasscodeBuffer`, max 6 digits)
+- Zeroized secret memory (`zeroize`)
+- Branchless (fixed-iteration) passcode comparison
+- Lockout protection against brute-force attempts
+- Optional compile-time gated MFA (acoustic challenge)
+- Pure state transitions returning explicit hardware actions
 
 ---
 
@@ -20,23 +21,19 @@ This project demonstrates:
 cargo build
 ```
 
-## Run
+## Run (demo binary)
 
-```bash
-cargo run
-```
-
----
-
-## Optional Feature: Acoustic MFA
-
-Compile with:
+Compile / test with:
 
 ```bash
 cargo build --features acoustic_unlock
+cargo test  --features acoustic_unlock
 ```
 
-This enables a second authentication factor after correct PIN entry.
+When enabled, a correct PIN transitions to `PendingAudio`, where a second factor must be verified.
+
+> Note: the `verify_audio_challenge` implementation is intentionally a **secure-fail stub**.
+> In a real system, the MFA verifier must be backed by authenticated cryptographic proof.
 
 ---
 
@@ -44,6 +41,7 @@ This enables a second authentication factor after correct PIN entry.
 
 The system is modeled as a pure state machine:
 
+<<<<<<< HEAD
 ```
 Event + CurrentState -> (NextState, Actions)
 ```
@@ -58,10 +56,6 @@ Event + CurrentState -> (NextState, Actions)
 * `Alarm`
 
 All hardware side-effects (door control, alarm, display) are emitted as `Action` values and must be handled externally.
-
----
-
-## Security Notes
 
 * Passcodes are stored in bounded buffers.
 * Memory is zeroized on clear and drop.
@@ -79,9 +73,26 @@ Designed for embedded / IoT lock scenarios where:
 * Timing attacks are low risk but mitigated
 * Memory disclosure risk is reduced via zeroization
 * MFA may be required depending on deployment
+=======
+- Passcodes are stored in bounded buffers.
+- Secret memory is zeroized on clear and on drop.
+- Passcode comparison avoids early-return branching by comparing a fixed-size buffer.
+- Lockout activates after 3 failed attempts.
+- Empty "Enter" submissions are ignored to prevent trivial lockout-by-spam.
+- The MFA path is compile-time gated and defaults to secure failure.
+
+---
+
+## Testing
+
+Run unit + integration tests:
+
+```bash
+cargo test
+```
 
 ---
 
 ## License
 
-Apache
+Apache-2.0 (see `LICENSE`).

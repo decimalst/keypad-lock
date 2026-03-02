@@ -1,9 +1,18 @@
 [package]
-name = "keypad_lock"
+name = "keypad-lock-fsm"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+description = "Memory-safe, side-effect-free finite state machine (FSM) modeling a secure keypad lock system."
+readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+# Optional multi-factor authentication step after correct PIN entry.
+acoustic_unlock = []
 
 [dependencies]
-zeroize = { version = "1.7", features = ["zeroize_derive"] }
+zeroize = { version = "1.7", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
