@@ -21,7 +21,7 @@ fn main() {
         let (next, actions) = state.next(ev);
         state = next;
 
-        for a in actions.iter() {
+        for a in actions {
             println!("Action: {a:?}");
         }
     }

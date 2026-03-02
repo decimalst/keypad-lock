@@ -212,7 +212,7 @@ fn alarm_times_out_back_to_locked() {
     // Construct an Alarm state directly.
     let mut passcode = PasscodeBuffer::default();
     for &v in &[1u8, 2u8, 3u8] {
-        passcode.push(d(v));
+        let _ = passcode.push(d(v));
     }
 
     let mut state = SecurityState::Alarm {
@@ -293,7 +293,7 @@ fn restore_is_primed_with_true_door_state_to_prevent_locking_open() {
 
     let mut passcode = PasscodeBuffer::default();
     for &v in &[1u8, 2u8, 3u8] {
-        passcode.push(d(v));
+        let _ = passcode.push(d(v));
     }
 
     // Create a snapshot in Unlocked mode with elapsed beyond duration.

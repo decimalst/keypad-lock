@@ -38,11 +38,22 @@ pub const MFA_TIMEOUT: Duration = Duration::from_secs(5);
 /// Max number of actions emitted by any single transition.
 pub const MAX_ACTIONS: usize = 4;
 
+pub enum PushActionError { Full }
+
 /// Fixed-capacity action buffer (zero-allocation).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Actions<const N: usize> {
     buf: [Option<Action>; N],
     len: usize,
+}
+
+impl<const N: usize> Actions<N> {
+    #[must_use]
+    pub fn push_debug(&mut self, a: Action) -> bool {
+        let ok = self.push(a);
+        debug_assert!(ok, "Actions overflow: increase MAX_ACTIONS or reduce emitted actions");
+        ok
+    }
 }
 
 impl<const N: usize> Default for Actions<N> {
@@ -120,7 +131,7 @@ macro_rules! actions {
     ($($a:expr),+ $(,)?) => {{
         let mut out = Actions::<MAX_ACTIONS>::default();
         $(
-            let _ = out.push($a);
+            let _ = out.push_debug($a);
         )+
         out
     }};
