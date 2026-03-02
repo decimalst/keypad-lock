@@ -84,4 +84,4 @@ Designed for embedded / IoT lock scenarios where:
 
 ## License
 
-MIT
+Apache
