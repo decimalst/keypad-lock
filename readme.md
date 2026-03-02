@@ -41,7 +41,6 @@ When enabled, a correct PIN transitions to `PendingAudio`, where a second factor
 
 The system is modeled as a pure state machine:
 
-<<<<<<< HEAD
 ```
 Event + CurrentState -> (NextState, Actions)
 ```
