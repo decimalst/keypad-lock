@@ -45,12 +45,22 @@ This separation enables:
 
 * Bounded passcode buffer (max 6 digits)
 * Secret memory zeroized on clear and drop (`zeroize`)
-* Fixed-iteration passcode comparison (constant-time style)
+- Fixed-iteration passcode comparison via `subtle` (constant-time style)
 * Lockout after configurable failed attempts
 * Secure-fail MFA stub (compile-time gated feature)
 * Strict validation of persisted state to prevent impossible restores
 * Diff-based output emission (prevents action spam and hardware jitter)
 * Fail-closed posture on restore
+
+### Persistence & sealing
+
+The FSM never stores plaintext passcodes in durable storage. Instead it snapshots/restores using an injected `PasscodeSealer`:
+
+- `seal(passcode) -> blob` for writing to EEPROM/NVRAM
+- `unseal(blob) -> passcode` for restore
+
+The blob format and cryptographic properties are platform-defined (e.g., AEAD with device-bound keys).
+Tampered/invalid blobs are rejected during restore.
 
 ---
 
