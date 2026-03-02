@@ -12,6 +12,7 @@ acoustic_unlock = []
 
 [dependencies]
 zeroize = { version = "1.7", features = ["derive"] }
+subtle = "2.6"
 
 [profile.release]
 lto = true

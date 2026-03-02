@@ -12,9 +12,9 @@
 
 #![forbid(unsafe_code)]
 
-use core::hint::black_box;
 use std::time::Duration;
 
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Minimum passcode length accepted during setup.
@@ -55,6 +55,7 @@ impl<const N: usize> Default for Actions<N> {
 }
 
 impl<const N: usize> Actions<N> {
+    #[must_use]
     pub fn push(&mut self, a: Action) -> bool {
         if self.len < N {
             self.buf[self.len] = Some(a);
@@ -81,7 +82,7 @@ impl<const N: usize> Actions<N> {
 impl<const N: usize> IntoIterator for Actions<N> {
     type Item = Action;
     type IntoIter = core::iter::FilterMap<
-        core::array::IntoIter<Option<Action>, N>,
+        core::iter::Take<core::array::IntoIter<Option<Action>, N>>,
         fn(Option<Action>) -> Option<Action>,
     >;
 
@@ -89,7 +90,11 @@ impl<const N: usize> IntoIterator for Actions<N> {
         fn keep(x: Option<Action>) -> Option<Action> {
             x
         }
-        self.buf.into_iter().filter_map(keep as fn(_) -> _)
+        let len = self.len;
+        self.buf
+            .into_iter()
+            .take(len)
+            .filter_map(keep as fn(_) -> _)
     }
 }
 
@@ -153,7 +158,7 @@ impl TryFrom<u8> for Digit {
 ///
 /// Notes:
 /// - The buffer uses a fixed capacity (`MAX_PASSCODE_LEN`).
-/// - Comparisons are performed in a branchless, fixed-iteration manner.
+/// - Comparisons are performed in a fixed-iteration, constant-time style via `subtle`.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct PasscodeBuffer {
     digits: [u8; MAX_PASSCODE_LEN],
@@ -183,6 +188,7 @@ impl PasscodeBuffer {
     /// Push a digit, returning whether it was accepted.
     ///
     /// If the buffer is full, this is a no-op and returns `false`.
+    #[must_use]
     pub fn push(&mut self, d: Digit) -> bool {
         let idx = self.len as usize;
         if idx < MAX_PASSCODE_LEN {
@@ -215,41 +221,29 @@ impl PasscodeBuffer {
         self.len as usize >= MAX_PASSCODE_LEN
     }
 
-    /// Constant-time equality of digits + length.
+    /// Constant-time style equality of digits + length using `subtle`.
     ///
-    /// This runs a fixed number of iterations (always `MAX_PASSCODE_LEN`).
-    ///
-    /// Hardening: `black_box` discourages LLVM from proving facts about `diff`
-    /// and “helpfully” reintroducing data-dependent early-exit behavior.
-    fn constant_time_eq(&self, other: &Self) -> bool {
-        let mut diff: u8 = 0;
-
-        for i in 0..MAX_PASSCODE_LEN {
-            diff |= self.digits[i] ^ other.digits[i];
-            diff = black_box(diff);
-        }
-
-        diff |= self.len ^ other.len;
-        diff = black_box(diff);
-
-        black_box(diff) == 0
+    /// Runs a fixed number of operations (always compares all digits + the length).
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        let digits_eq = self.digits.ct_eq(&other.digits);
+        let len_eq = self.len.ct_eq(&other.len);
+        digits_eq & len_eq
     }
 
-    /// Branchless digit + length compare, requiring non-empty input.
+    /// Constant-time style match requiring non-empty input.
     pub fn matches(&self, other: &Self) -> bool {
-        let eq = self.constant_time_eq(other);
-        let non_empty = self.len != 0;
-        eq && non_empty
+        let eq = self.ct_eq(other);
+        let non_empty = self.len.ct_ne(&0u8);
+        bool::from(eq & non_empty)
+    }
+
+    /// For persistence only: copy out the raw fixed buffer + len.
+    ///
+    /// This keeps the "no PartialEq" stance while still supporting snapshots.
+    fn raw_parts(&self) -> ([u8; MAX_PASSCODE_LEN], u8) {
+        (self.digits, self.len)
     }
 }
-
-impl PartialEq for PasscodeBuffer {
-    fn eq(&self, other: &Self) -> bool {
-        self.constant_time_eq(other)
-    }
-}
-
-impl Eq for PasscodeBuffer {}
 
 /// Door state as observed by a physical sensor (e.g., magnetic reed switch).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -292,7 +286,9 @@ pub enum Action {
 }
 
 /// FSM state.
-#[derive(Debug, PartialEq, Eq)]
+///
+/// Note: we intentionally do NOT derive `PartialEq/Eq` because this state contains secret material.
+#[derive(Debug)]
 pub enum SecurityState {
     /// Initial setup: choose a passcode.
     Setup { buffer: PasscodeBuffer },
@@ -331,6 +327,8 @@ impl Default for SecurityState {
 }
 
 /// A compact, validation-friendly snapshot of durable state for NVRAM persistence.
+///
+/// NOTE: This is not redacted; treat it as sensitive if your threat model includes memory disclosure.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct PersistedState {
     pub version: u8,
@@ -375,17 +373,15 @@ impl PersistedPasscode {
         for i in 0..limit {
             let v = *self.digits.get(i)?;
             let d = Digit::new(v)?;
-            buf.push(d);
+            let _ = buf.push(d);
         }
 
         Some(buf)
     }
 
     fn from_buffer(buf: &PasscodeBuffer) -> Self {
-        Self {
-            digits: buf.digits,
-            len: buf.len,
-        }
+        let (digits, len) = buf.raw_parts();
+        Self { digits, len }
     }
 }
 
@@ -458,10 +454,14 @@ impl SecurityState {
             elapsed_ms,
         }
     }
+
     /// Restore *and* immediately prime the FSM with the current physical door state.
     ///
     /// Callers should apply the returned actions before emitting TimerTick.
-    pub fn restore_primed(snapshot: PersistedState, door_now: DoorPhysicalState) -> Option<(Self, Actions<MAX_ACTIONS>)> {
+    pub fn restore_primed(
+        snapshot: PersistedState,
+        door_now: DoorPhysicalState,
+    ) -> Option<(Self, Actions<MAX_ACTIONS>)> {
         let state = Self::restore(snapshot)?;
         let (next, acts) = state.next(Event::DoorSensorChanged(door_now));
         Some((next, acts))
@@ -514,7 +514,7 @@ impl SecurityState {
         match (self, event) {
             // --- MODE 1: SETUP ---
             (Setup { mut buffer }, Keypress(d)) => {
-                buffer.push(d);
+                let _ = buffer.push(d);
                 let len = buffer.len();
                 (Setup { buffer }, actions![Action::UpdateDisplayLen(len)])
             }
@@ -547,7 +547,7 @@ impl SecurityState {
                 },
                 Keypress(d),
             ) => {
-                guess.push(d);
+                let _ = guess.push(d);
                 let len = guess.len();
                 (
                     Locked {
@@ -672,10 +672,7 @@ impl SecurityState {
                 )
             }
             (Locked { passcode, guess, failed_attempts }, DoorSensorChanged(DoorPhysicalState::Closed)) => {
-                (
-                    Locked { passcode, guess, failed_attempts },
-                    actions![]
-                )
+                (Locked { passcode, guess, failed_attempts }, actions![])
             }
             (Locked { passcode, guess, failed_attempts }, TimerTick(_)) => {
                 (Locked { passcode, guess, failed_attempts }, actions![])

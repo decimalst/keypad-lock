@@ -69,9 +69,12 @@ fn passcode_buffer_is_bounded_and_clear_zeroes() {
     pb.clear();
     assert_eq!(pb.len(), 0);
     assert!(pb.is_empty());
+    assert!(!pb.is_full());
 
-    // After clear, the buffer should be structurally equal to default.
-    assert_eq!(pb, PasscodeBuffer::default());
+    // Verify the backing storage is zeroed by observing the persisted snapshot.
+    let snap = SecurityState::Setup { buffer: pb }.snapshot();
+    assert_eq!(snap.passcode.len, 0);
+    assert!(snap.passcode.digits.iter().all(|&x| x == 0));
 }
 
 #[test]
