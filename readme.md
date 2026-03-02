@@ -1,90 +1,89 @@
+
+---
+
 # Keypad Lock FSM (Rust)
 
-A memory-safe, side-effect-free finite state machine (FSM) modeling a secure keypad lock system in Rust.
+A memory-safe, allocation-free, side-effect-free finite state machine (FSM) modeling a secure embedded keypad lock.
 
-This project demonstrates:
-
-
-- Type-safe digit representation (`Digit`)
-- Bounded passcode buffers (`PasscodeBuffer`, max 6 digits)
-- Zeroized secret memory (`zeroize`)
-- Branchless (fixed-iteration) passcode comparison
-- Lockout protection against brute-force attempts
-- Optional compile-time gated MFA (acoustic challenge)
-- Pure state transitions returning explicit hardware actions
+This project demonstrates disciplined state modeling, secret hygiene, and hardware-boundary separation suitable for embedded or IoT deployments.
 
 ---
 
-## Build
+## Design Goals
 
-```bash
-cargo build
-```
-
-## Run (demo binary)
-
-Compile / test with:
-
-```bash
-cargo build --features acoustic_unlock
-cargo test  --features acoustic_unlock
-```
-
-When enabled, a correct PIN transitions to `PendingAudio`, where a second factor must be verified.
-
-> Note: the `verify_audio_challenge` implementation is intentionally a **secure-fail stub**.
-> In a real system, the MFA verifier must be backed by authenticated cryptographic proof.
+* No heap allocation
+* No `unsafe`
+* Deterministic, pure transitions
+* Explicit hardware side-effects
+* Secret memory hygiene
+* Fail-closed recovery from persistence
 
 ---
 
-## Architecture
+## Core Architecture
 
-The system is modeled as a pure state machine:
+The system is modeled as a pure state transition:
 
-```
+```text
 Event + CurrentState -> (NextState, Actions)
 ```
 
-### States
+The FSM itself performs **no I/O**.
 
-* `Setup`
-* `Locked`
-* `Lockout`
-* `PendingAudio` (optional MFA)
-* `Unlocked`
-* `Alarm`
+All hardware effects (door lock, alarm, display updates) are emitted as explicit `Action` values and must be executed by an external driver.
 
-All hardware side-effects (door control, alarm, display) are emitted as `Action` values and must be handled externally.
+This separation enables:
 
-* Passcodes are stored in bounded buffers.
-* Memory is zeroized on clear and drop.
-* Passcode comparison avoids early-return branching.
-* Lockout activates after 3 failed attempts.
-* MFA path is compile-time gated and defaults to secure failure.
+* Deterministic testing
+* Platform independence
+* Embedded-friendly integration
+* Replayable simulation
+
+---
+
+## Security Characteristics
+
+* Bounded passcode buffer (max 6 digits)
+* Secret memory zeroized on clear and drop (`zeroize`)
+* Fixed-iteration passcode comparison (constant-time style)
+* Lockout after configurable failed attempts
+* Secure-fail MFA stub (compile-time gated feature)
+* Strict validation of persisted state to prevent impossible restores
+* Diff-based output emission (prevents action spam and hardware jitter)
+* Fail-closed posture on restore
+
+---
+
+## Optional MFA (Feature: `acoustic_unlock`)
+
+When enabled:
+
+```bash
+cargo build --features acoustic_unlock
+```
+
+Correct PIN entry transitions to `PendingAudio`, requiring a second factor.
+
+The included verifier is intentionally a secure-fail stub:
+
+> Production systems must use authenticated cryptographic verification.
 
 ---
 
 ## Threat Model
 
-Designed for embedded / IoT lock scenarios where:
+Designed for embedded lock scenarios where:
 
-* Offline brute-force is possible
-* Timing attacks are low risk but mitigated
-* Memory disclosure risk is reduced via zeroization
-* MFA may be required depending on deployment
-=======
-- Passcodes are stored in bounded buffers.
-- Secret memory is zeroized on clear and on drop.
-- Passcode comparison avoids early-return branching by comparing a fixed-size buffer.
-- Lockout activates after 3 failed attempts.
-- Empty "Enter" submissions are ignored to prevent trivial lockout-by-spam.
-- The MFA path is compile-time gated and defaults to secure failure.
+* Offline brute-force attempts are possible
+* Memory disclosure risk exists (mitigated via zeroization)
+* Persistence may be tampered with (validated strictly on restore)
+* Timing attacks are low risk but mitigated at the comparison layer
 
 ---
 
 ## Testing
 
-Run unit + integration tests:
+Run all tests:
 
 ```bash
 cargo test
@@ -92,6 +91,20 @@ cargo test
 
 ---
 
+## Why This Exists
+
+This project is intentionally over-engineered for a “keypad lock” in order to demonstrate:
+
+* Robust finite state machine design
+* Embedded-friendly Rust patterns
+* Secret handling discipline
+* Misuse-resistant persistence modeling
+* Clear separation of logic and side effects
+
+---
+
 ## License
 
-Apache-2.0 (see `LICENSE`).
+Apache-2.0
+
+---
