@@ -37,6 +37,19 @@ pub const UNLOCKED_DURATION: Duration = Duration::from_secs(10);
 /// How long the alarm remains active before resetting back to `Locked`.
 pub const ALARM_DURATION: Duration = Duration::from_secs(5);
 
+// -----------------------------
+// Policy toggles (explicit)
+// -----------------------------
+
+/// If `true`, opening the door while in `Locked` mode triggers `Alarm`.
+///
+/// This is a tamper-response policy: on many systems the door should not be able to open while locked
+/// unless the lock is bypassed or the sensor is spoofed.
+///
+/// If `false`, the FSM treats `DoorSensorChanged(Open)` while locked as a sensor anomaly and keeps
+/// the system locked with alarm off.
+pub const ALARM_ON_DOOR_OPEN_WHEN_LOCKED: bool = true;
+
 /// MFA timeout when `acoustic_unlock` is enabled.
 #[cfg(feature = "acoustic_unlock")]
 pub const MFA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -309,10 +322,24 @@ impl PasscodeBuffer {
         if (len as usize) > MAX_PASSCODE_LEN {
             return None;
         }
-        if digits.iter().any(|d| *d > 9) {
+
+        let used_len = len as usize;
+
+        // Validate only the used portion (tail is normalized).
+        if digits[..used_len].iter().any(|d| *d > 9) {
             return None;
         }
-        Some(Self { digits, len })
+
+        // Normalize tail to zero to avoid coupling correctness/tamper semantics to the sealer's behavior.
+        let mut normalized = digits;
+        for d in normalized[used_len..].iter_mut() {
+            *d = 0;
+        }
+
+        Some(Self {
+            digits: normalized,
+            len,
+        })
     }
 }
 
@@ -356,8 +383,30 @@ pub enum PersistedMode {
 impl<const BLOB_LEN: usize> PersistedState<BLOB_LEN> {
     pub const VERSION: u8 = 2;
 
-    pub fn validate_basic(&self) -> bool {
-        self.version == Self::VERSION && self.failed_attempts <= LOCKOUT_THRESHOLD
+    /// Strict validation of invariant combinations. This prevents impossible states from being restored.
+    pub fn validate_strict(&self) -> bool {
+        if self.version != Self::VERSION {
+            return false;
+        }
+        if self.failed_attempts > LOCKOUT_THRESHOLD {
+            return false;
+        }
+
+        match self.mode {
+            PersistedMode::Setup => self.failed_attempts == 0 && self.elapsed_ms == 0,
+            PersistedMode::Locked => {
+                // In locked mode, attempts may be 0..(threshold-1). Threshold implies lockout.
+                self.failed_attempts < LOCKOUT_THRESHOLD && self.elapsed_ms == 0
+            }
+            PersistedMode::Lockout => {
+                // Lockout implies the threshold was reached.
+                self.failed_attempts == LOCKOUT_THRESHOLD
+            }
+            #[cfg(feature = "acoustic_unlock")]
+            PersistedMode::PendingAudio => self.failed_attempts == 0,
+            PersistedMode::Unlocked => self.failed_attempts == 0,
+            PersistedMode::Alarm => self.failed_attempts == 0,
+        }
     }
 }
 
@@ -469,7 +518,9 @@ impl SecurityState {
                 *elapsed,
             ),
             #[cfg(feature = "acoustic_unlock")]
-            Mode::PendingAudio { passcode, elapsed } => (PersistedMode::PendingAudio, passcode, 0, *elapsed),
+            Mode::PendingAudio { passcode, elapsed } => {
+                (PersistedMode::PendingAudio, passcode, 0, *elapsed)
+            }
             Mode::Unlocked { passcode, elapsed, .. } => (PersistedMode::Unlocked, passcode, 0, *elapsed),
             Mode::Alarm { passcode, elapsed } => (PersistedMode::Alarm, passcode, 0, *elapsed),
         };
@@ -506,7 +557,7 @@ impl SecurityState {
         sealer: &S,
         snapshot: PersistedState<B>,
     ) -> Option<Self> {
-        if !snapshot.validate_basic() {
+        if !snapshot.validate_strict() {
             return None;
         }
 
@@ -683,15 +734,21 @@ impl SecurityState {
                 }
             }
             (Mode::Locked { passcode, guess, .. }, DoorSensorChanged(DoorPhysicalState::Open)) => {
+                // Explicit tamper-response policy: door opened while locked triggers alarm if enabled.
+                // If disabled, treat as a sensor anomaly and remain locked (alarm off).
                 guess.clear();
-                let passcode = core::mem::take(passcode);
-                self.mode = Mode::Alarm {
-                    passcode,
-                    elapsed: Duration::ZERO,
-                };
                 set_display(0);
                 set_lock(true);
-                set_alarm(true);
+                if ALARM_ON_DOOR_OPEN_WHEN_LOCKED {
+                    let passcode = core::mem::take(passcode);
+                    self.mode = Mode::Alarm {
+                        passcode,
+                        elapsed: Duration::ZERO,
+                    };
+                    set_alarm(true);
+                } else {
+                    set_alarm(false);
+                }
             }
             (Mode::Locked { .. }, DoorSensorChanged(DoorPhysicalState::Closed)) => {
                 set_lock(true);
