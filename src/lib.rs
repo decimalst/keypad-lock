@@ -162,6 +162,13 @@ impl PartialEq for PasscodeBuffer {
 
 impl Eq for PasscodeBuffer {}
 
+/// Door state as observed by a physical sensor (e.g., magnetic reed switch).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum DoorPhysicalState {
+    Open,
+    Closed,
+}
+
 /// External input to the FSM.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -173,6 +180,9 @@ pub enum Event {
     Clear,
     /// Passage of time.
     TimerTick(Duration),
+
+    /// Door sensor changed state (debounced/edge-detected externally).
+    DoorSensorChanged(DoorPhysicalState),
 
     /// Optional MFA: the measured audio frequency (Hz) from an external sensor.
     #[cfg(feature = "acoustic_unlock")]
@@ -226,6 +236,177 @@ impl Default for SecurityState {
         }
     }
 }
+
+/// A compact, validation-friendly snapshot of durable state for NVRAM persistence.
+///
+/// Why this exists:
+/// - Power loss should not implicitly revert the system to `Setup` if a passcode was already configured.
+/// - Embedded deployments often store a small, fixed-size record in EEPROM/flash.
+///
+/// Notes:
+/// - We intentionally do **not** persist the in-progress `guess` buffer.
+/// - We store elapsed time in milliseconds with saturation to avoid overflow.
+/// - A version byte allows forward-compatible migrations.
+///
+/// This struct is designed to be trivially serializable (e.g. via postcard/bincode), but you
+/// can also write it to EEPROM as a fixed-size record.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PersistedState {
+    pub version: u8,
+    pub mode: PersistedMode,
+    pub passcode: PersistedPasscode,
+    pub failed_attempts: u8,
+    pub elapsed_ms: u32,
+}
+
+/// Durable mode tag for persistence.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PersistedMode {
+    Setup,
+    Locked,
+    Lockout,
+    #[cfg(feature = "acoustic_unlock")]
+    PendingAudio,
+    Unlocked,
+    Alarm,
+}
+
+/// Durable passcode representation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PersistedPasscode {
+    pub digits: [u8; MAX_PASSCODE_LEN],
+    pub len: u8,
+}
+
+impl PersistedPasscode {
+    fn validate(&self) -> bool {
+        (self.len as usize) <= MAX_PASSCODE_LEN && self.digits.iter().all(|d| *d <= 9)
+    }
+
+    fn to_buffer(&self) -> Option<PasscodeBuffer> {
+        if !self.validate() {
+            return None;
+        }
+        let mut buf = PasscodeBuffer::default();
+        for i in 0..(self.len as usize) {
+            // Safe due to validate()
+            let d = Digit(self.digits[i]);
+            buf.push(d);
+        }
+        Some(buf)
+    }
+
+    fn from_buffer(buf: &PasscodeBuffer) -> Self {
+        Self {
+            digits: buf.digits,
+            len: buf.len,
+        }
+    }
+}
+
+impl PersistedState {
+    pub const VERSION: u8 = 1;
+
+    /// Validate invariants before attempting to restore.
+    pub fn validate(&self) -> bool {
+        self.version == Self::VERSION
+            && self.passcode.validate()
+            && self.failed_attempts <= LOCKOUT_THRESHOLD
+    }
+}
+
+impl SecurityState {
+    /// Create a persistence snapshot suitable for writing to EEPROM/NVRAM.
+    ///
+    /// Call this *outside* the FSM after processing an event batch.
+    #[must_use]
+    pub fn snapshot(&self) -> PersistedState {
+        let (mode, passcode, failed_attempts, elapsed) = match self {
+            SecurityState::Setup { buffer } => (
+                PersistedMode::Setup,
+                PersistedPasscode::from_buffer(buffer),
+                0,
+                Duration::ZERO,
+            ),
+            SecurityState::Locked {
+                passcode,
+                guess: _,
+                failed_attempts,
+            } => (
+                PersistedMode::Locked,
+                PersistedPasscode::from_buffer(passcode),
+                *failed_attempts,
+                Duration::ZERO,
+            ),
+            SecurityState::Lockout { passcode, elapsed } => (
+                PersistedMode::Lockout,
+                PersistedPasscode::from_buffer(passcode),
+                LOCKOUT_THRESHOLD,
+                *elapsed,
+            ),
+            #[cfg(feature = "acoustic_unlock")]
+            SecurityState::PendingAudio { passcode, elapsed } => (
+                PersistedMode::PendingAudio,
+                PersistedPasscode::from_buffer(passcode),
+                0,
+                *elapsed,
+            ),
+            SecurityState::Unlocked { passcode, elapsed } => (
+                PersistedMode::Unlocked,
+                PersistedPasscode::from_buffer(passcode),
+                0,
+                *elapsed,
+            ),
+            SecurityState::Alarm { passcode, elapsed } => (
+                PersistedMode::Alarm,
+                PersistedPasscode::from_buffer(passcode),
+                0,
+                *elapsed,
+            ),
+        };
+
+        let elapsed_ms = elapsed
+            .as_millis()
+            .min(u32::MAX as u128) as u32;
+
+        PersistedState {
+            version: PersistedState::VERSION,
+            mode,
+            passcode,
+            failed_attempts,
+            elapsed_ms,
+        }
+    }
+
+    /// Restore from a persisted snapshot.
+    ///
+    /// If the snapshot is invalid/corrupt, returns `None` so the caller can `unwrap_or_default()`.
+    pub fn restore(snapshot: PersistedState) -> Option<Self> {
+        if !snapshot.validate() {
+            return None;
+        }
+
+        let passcode = snapshot.passcode.to_buffer()?;
+        let elapsed = Duration::from_millis(snapshot.elapsed_ms as u64);
+
+        let state = match snapshot.mode {
+            PersistedMode::Setup => SecurityState::Setup { buffer: passcode },
+            PersistedMode::Locked => SecurityState::Locked {
+                passcode,
+                guess: PasscodeBuffer::default(),
+                failed_attempts: snapshot.failed_attempts,
+            },
+            PersistedMode::Lockout => SecurityState::Lockout { passcode, elapsed },
+            #[cfg(feature = "acoustic_unlock")]
+            PersistedMode::PendingAudio => SecurityState::PendingAudio { passcode, elapsed },
+            PersistedMode::Unlocked => SecurityState::Unlocked { passcode, elapsed },
+            PersistedMode::Alarm => SecurityState::Alarm { passcode, elapsed },
+        };
+
+        Some(state)
+    }
+}
+
 
 fn add_duration_saturating(a: Duration, b: Duration) -> Duration {
     // Hardening: prevent panic on overflow in adversarial / fuzz scenarios.
@@ -489,7 +670,34 @@ impl SecurityState {
                 }
             }
 
-            // Catch-all: drop invalid inputs (e.g., keypresses during lockout)
+            
+            // --- DOOR SENSOR (Physical Intrusion) ---
+            // Treat "door opened while we believe we're secured" as an intrusion -> Alarm.
+            (Locked { passcode, guess: mut guess, failed_attempts }, DoorSensorChanged(DoorPhysicalState::Open)) => {
+                // Clear any in-progress guess to reduce residual secret exposure.
+                guess.clear();
+                (
+                    Alarm { passcode, elapsed: Duration::ZERO },
+                    vec![Action::SoundAlarm(true), Action::SetDoorLock(true), Action::UpdateDisplayLen(0)],
+                )
+            }
+            (Lockout { passcode, elapsed }, DoorSensorChanged(DoorPhysicalState::Open)) => {
+                // Stay in lockout but assert secure posture.
+                (
+                    Lockout { passcode, elapsed },
+                    vec![Action::SoundAlarm(true), Action::SetDoorLock(true)],
+                )
+            }
+            (Unlocked { passcode, elapsed }, DoorSensorChanged(_)) => {
+                // Door events while unlocked are informational; no state change.
+                (Unlocked { passcode, elapsed }, vec![])
+            }
+            (Alarm { passcode, elapsed }, DoorSensorChanged(_)) => {
+                // Ignore; alarm already active.
+                (Alarm { passcode, elapsed }, vec![Action::SoundAlarm(true), Action::SetDoorLock(true)])
+            }
+
+// Catch-all: drop invalid inputs (e.g., keypresses during lockout)
             (state, _) => (state, vec![]),
         }
     }

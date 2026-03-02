@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use keypad_lock_fsm::{Action, Digit, Event, PasscodeBuffer, SecurityState, ALARM_DURATION, LOCKOUT_DURATION, MIN_PASSCODE_LEN, UNLOCKED_DURATION};
+use keypad_lock_fsm::{Action, Digit, DoorPhysicalState, Event, PasscodeBuffer, PersistedState, SecurityState, ALARM_DURATION, LOCKOUT_DURATION, MIN_PASSCODE_LEN, UNLOCKED_DURATION};
 
 fn d(v: u8) -> Digit {
     Digit::new(v).unwrap()
@@ -219,6 +219,58 @@ fn alarm_times_out_back_to_locked() {
     assert!(matches!(state, SecurityState::Locked { .. }));
     assert!(actions.contains(&Action::SoundAlarm(false)));
 }
+
+
+#[test]
+fn door_open_while_locked_triggers_alarm() {
+    // Setup PIN 1-2-3.
+    let (state, _actions) = enter_passcode(SecurityState::default(), &[1, 2, 3]);
+    assert!(matches!(state, SecurityState::Locked { .. }));
+
+    let (state, actions) = state.next(Event::DoorSensorChanged(DoorPhysicalState::Open));
+
+    assert!(matches!(state, SecurityState::Alarm { .. }));
+    assert!(actions.contains(&Action::SoundAlarm(true)));
+    assert!(actions.contains(&Action::SetDoorLock(true)));
+}
+
+#[test]
+fn persisted_snapshot_roundtrip_restores_secure_state() {
+    // Setup PIN 1-2-3 and enter lockout.
+    let (mut state, _actions) = enter_passcode(SecurityState::default(), &[1, 2, 3]);
+
+    for _ in 0..3 {
+        state = state.next(Event::Keypress(d(9))).0;
+        state = state.next(Event::Keypress(d(9))).0;
+        state = state.next(Event::Keypress(d(9))).0;
+        state = state.next(Event::Enter).0;
+    }
+    assert!(matches!(state, SecurityState::Lockout { .. }));
+
+    let snap = state.snapshot();
+    assert_eq!(snap.version, PersistedState::VERSION);
+
+    let restored = SecurityState::restore(snap).expect("snapshot should restore");
+    assert!(matches!(restored, SecurityState::Lockout { .. }));
+}
+
+#[test]
+fn corrupted_persisted_state_falls_back_to_default() {
+    let mut bad = PersistedState {
+        version: 99,
+        mode: keypad_lock_fsm::PersistedMode::Locked,
+        passcode: keypad_lock_fsm::PersistedPasscode { digits: [255u8; keypad_lock_fsm::MAX_PASSCODE_LEN], len: 7 },
+        failed_attempts: 250,
+        elapsed_ms: u32::MAX,
+    };
+
+    assert!(SecurityState::restore(bad).is_none());
+
+    // Fix version but keep invalid digits
+    bad.version = PersistedState::VERSION;
+    assert!(SecurityState::restore(bad).is_none());
+}
+
 
 #[test]
 fn constants_are_sane() {
