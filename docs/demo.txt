@@ -1,0 +1,17 @@
+KEYPAD LOCK / deterministic Rust demo
+No hardware. No sleeps. PIN input stays redacted.
+
+00  Boot / synchronize outputs         Setup        bolt=LOCKED   alarm=off
+01  Enroll a demonstration PIN         Locked       bolt=LOCKED   alarm=off
+02  Reject an incorrect PIN            Locked       bolt=LOCKED   alarm=off
+03  Accept the correct PIN             Unlocked     bolt=RELEASED alarm=off
+04  Door opens                         Unlocked     bolt=RELEASED alarm=off
+05  10s / open door inhibits bolt      Unlocked     bolt=RELEASED alarm=off
+06  Door closes / relock               Locked       bolt=LOCKED   alarm=off
+07  Three failures / lockout           Lockout      bolt=LOCKED   alarm=ON
+08  Correct PIN ignored in lockout     Lockout      bolt=LOCKED   alarm=ON
+09  30s / retry window resets          Locked       bolt=LOCKED   alarm=off
+10  Forced opening / alarm             Alarm        bolt=LOCKED   alarm=ON
+11  Door closed / alarm expires        Locked       bolt=LOCKED   alarm=off
+
+All transitions use the same no_std library as an embedded adapter.

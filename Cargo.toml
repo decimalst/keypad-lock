@@ -1,7 +1,11 @@
 [package]
 name = "keypad-lock-fsm"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.98"
+repository = "https://github.com/decimalst/keypad-lock"
+keywords = ["embedded", "no-std", "state-machine", "keypad"]
+categories = ["embedded", "no-std"]
 license = "Apache-2.0"
 description = "Memory-safe, side-effect-free finite state machine (FSM) modeling a secure keypad lock system."
 readme = "README.md"
@@ -11,9 +15,15 @@ readme = "README.md"
 acoustic_unlock = []
 
 [dependencies]
-zeroize = { version = "1.7", features = ["derive"] }
-subtle = "2.6"
+zeroize = { version = "1.8", default-features = false, features = ["derive"] }
+subtle = { version = "2.6", default-features = false }
 
 [profile.release]
 lto = true
 codegen-units = 1
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

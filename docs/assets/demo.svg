@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" role="img" aria-label="Keypad lock architecture">
+<rect width="1600" height="1000" fill="#0b1220"/>
+<text x="64" y="64.4" fill="#73e0bf" font-family="Arial, sans-serif" font-size="20" font-weight="700">KEYPAD LOCK / LIVE RUST TRANSCRIPT</text>
+<text x="64" y="146.56" fill="#eef4fc" font-family="Arial, sans-serif" font-size="58" font-weight="700">Watch the policy do the work.</text>
+<text x="64" y="201.32" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="26" font-weight="400">A reproducible host simulation. No hardware. No sleeps. No PIN logging.</text>
+<rect x="64" y="244" width="1472" height="642" rx="18" fill="#121e30" stroke="#2b3b52" stroke-width="2"/>
+<text x="90" y="287.86" fill="#73e0bf" font-family="Arial, sans-serif" font-size="23" font-weight="400">$ cargo run --locked --quiet</text>
+<text x="90" y="334.12" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="16" font-weight="700">STEP</text>
+<text x="182" y="334.12" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="16" font-weight="700">EVENT</text>
+<text x="915" y="334.12" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="16" font-weight="700">STATE</text>
+<text x="1150" y="334.12" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="16" font-weight="700">BOLT</text>
+<text x="1400" y="334.12" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="16" font-weight="700">ALARM</text>
+<text x="94" y="384.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">00</text>
+<text x="182" y="385.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Boot / synchronize outputs</text>
+<text x="915" y="385.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="700">Setup</text>
+<text x="1150" y="384.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="384.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="425.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">01</text>
+<text x="182" y="426.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Enroll a demonstration PIN</text>
+<text x="915" y="426.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="700">Locked</text>
+<text x="1150" y="425.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="425.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="466.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">02</text>
+<text x="182" y="467.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Reject an incorrect PIN</text>
+<text x="915" y="467.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="700">Locked</text>
+<text x="1150" y="466.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="466.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="507.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">03</text>
+<text x="182" y="508.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Accept the correct PIN</text>
+<text x="915" y="508.86" fill="#73e0bf" font-family="Arial, sans-serif" font-size="23" font-weight="700">Unlocked</text>
+<text x="1150" y="507.22" fill="#73e0bf" font-family="Arial, sans-serif" font-size="21" font-weight="400">RELEASED</text>
+<text x="1421" y="507.22" fill="#73e0bf" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="548.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">04</text>
+<text x="182" y="549.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Door opens</text>
+<text x="915" y="549.86" fill="#73e0bf" font-family="Arial, sans-serif" font-size="23" font-weight="700">Unlocked</text>
+<text x="1150" y="548.22" fill="#73e0bf" font-family="Arial, sans-serif" font-size="21" font-weight="400">RELEASED</text>
+<text x="1421" y="548.22" fill="#73e0bf" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="589.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">05</text>
+<text x="182" y="590.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">10s / open door inhibits bolt</text>
+<text x="915" y="590.86" fill="#73e0bf" font-family="Arial, sans-serif" font-size="23" font-weight="700">Unlocked</text>
+<text x="1150" y="589.22" fill="#73e0bf" font-family="Arial, sans-serif" font-size="21" font-weight="400">RELEASED</text>
+<text x="1421" y="589.22" fill="#73e0bf" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="630.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">06</text>
+<text x="182" y="631.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Door closes / relock</text>
+<text x="915" y="631.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="700">Locked</text>
+<text x="1150" y="630.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="630.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="671.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">07</text>
+<text x="182" y="672.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Three failures / lockout</text>
+<text x="915" y="672.86" fill="#ffcf83" font-family="Arial, sans-serif" font-size="23" font-weight="700">Lockout</text>
+<text x="1150" y="671.22" fill="#ffcf83" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="671.22" fill="#ffcf83" font-family="Arial, sans-serif" font-size="21" font-weight="400">ON</text>
+<text x="94" y="712.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">08</text>
+<text x="182" y="713.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Correct PIN ignored in lockout</text>
+<text x="915" y="713.86" fill="#ffcf83" font-family="Arial, sans-serif" font-size="23" font-weight="700">Lockout</text>
+<text x="1150" y="712.22" fill="#ffcf83" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="712.22" fill="#ffcf83" font-family="Arial, sans-serif" font-size="21" font-weight="400">ON</text>
+<text x="94" y="753.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">09</text>
+<text x="182" y="754.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">30s / retry window resets</text>
+<text x="915" y="754.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="700">Locked</text>
+<text x="1150" y="753.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="753.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="94" y="794.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">10</text>
+<text x="182" y="795.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Forced opening / alarm</text>
+<text x="915" y="795.86" fill="#ffcf83" font-family="Arial, sans-serif" font-size="23" font-weight="700">Alarm</text>
+<text x="1150" y="794.22" fill="#ffcf83" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="794.22" fill="#ffcf83" font-family="Arial, sans-serif" font-size="21" font-weight="400">ON</text>
+<rect x="80" y="810" width="1440" height="38" rx="6" fill="#213247" stroke="#213247" stroke-width="2"/>
+<text x="94" y="835.22" fill="#a4b5cc" font-family="Arial, sans-serif" font-size="21" font-weight="400">11</text>
+<text x="182" y="836.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="400">Door closed / alarm expires</text>
+<text x="915" y="836.86" fill="#eef4fc" font-family="Arial, sans-serif" font-size="23" font-weight="700">Locked</text>
+<text x="1150" y="835.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">LOCKED</text>
+<text x="1421" y="835.22" fill="#eef4fc" font-family="Arial, sans-serif" font-size="21" font-weight="400">off</text>
+<text x="64" y="946.32" fill="#73e0bf" font-family="Arial, sans-serif" font-size="26" font-weight="700">10s auto-relock</text>
+<text x="480" y="946.32" fill="#ffcf83" font-family="Arial, sans-serif" font-size="26" font-weight="700">30s retry lockout</text>
+<text x="1010" y="946.32" fill="#84baff" font-family="Arial, sans-serif" font-size="26" font-weight="700">Open door inhibits timed relock</text>
+</svg>

@@ -1,0 +1,124 @@
+{
+  "date": "2026-09-18",
+  "rust": "1.98.1",
+  "cargo-llvm-cov": "0.9.1",
+  "scope": "src/lib.rs and src/main.rs; configurations measured separately; no source exclusions",
+  "configurations": {
+    "default": {
+      "source_totals": {
+        "lines": {
+          "count": 620,
+          "covered": 619,
+          "percent": 99.83870967741936
+        },
+        "functions": {
+          "count": 49,
+          "covered": 49,
+          "percent": 100
+        },
+        "regions": {
+          "count": 711,
+          "covered": 708,
+          "notcovered": 3,
+          "percent": 99.57805907172997
+        }
+      },
+      "files": {
+        "lib.rs": {
+          "lines": {
+            "count": 548,
+            "covered": 547,
+            "percent": 99.8175182481752
+          },
+          "functions": {
+            "count": 41,
+            "covered": 41,
+            "percent": 100.0
+          },
+          "regions": {
+            "count": 557,
+            "covered": 554,
+            "notcovered": 3,
+            "percent": 99.46140035906643
+          }
+        },
+        "main.rs": {
+          "lines": {
+            "count": 72,
+            "covered": 72,
+            "percent": 100.0
+          },
+          "functions": {
+            "count": 8,
+            "covered": 8,
+            "percent": 100.0
+          },
+          "regions": {
+            "count": 154,
+            "covered": 154,
+            "notcovered": 0,
+            "percent": 100.0
+          }
+        }
+      }
+    },
+    "all": {
+      "source_totals": {
+        "lines": {
+          "count": 698,
+          "covered": 697,
+          "percent": 99.8567335243553
+        },
+        "functions": {
+          "count": 49,
+          "covered": 49,
+          "percent": 100
+        },
+        "regions": {
+          "count": 756,
+          "covered": 752,
+          "notcovered": 4,
+          "percent": 99.47089947089947
+        }
+      },
+      "files": {
+        "lib.rs": {
+          "lines": {
+            "count": 628,
+            "covered": 627,
+            "percent": 99.84076433121018
+          },
+          "functions": {
+            "count": 41,
+            "covered": 41,
+            "percent": 100.0
+          },
+          "regions": {
+            "count": 608,
+            "covered": 605,
+            "notcovered": 3,
+            "percent": 99.50657894736844
+          }
+        },
+        "main.rs": {
+          "lines": {
+            "count": 70,
+            "covered": 70,
+            "percent": 100.0
+          },
+          "functions": {
+            "count": 8,
+            "covered": 8,
+            "percent": 100.0
+          },
+          "regions": {
+            "count": 148,
+            "covered": 147,
+            "notcovered": 1,
+            "percent": 99.32432432432432
+          }
+        }
+      }
+    }
+  }
+}
