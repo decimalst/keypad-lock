@@ -28,7 +28,7 @@ The original default suite passed 13 tests; the original all-features suite pass
 
 ## Coverage
 
-Both feature configurations were measured **separately**, without excluding library or executable source. Tests and dependency source are outside the source-coverage denominator. Machine-readable counts are in [coverage-summary.json](coverage-summary.json).
+Both feature configurations were measured **separately**, without excluding library or executable source. Integration-test files and dependency source are outside the source-coverage denominator; the in-file secret-buffer unit test is included in `src/lib.rs`. Machine-readable counts are in [coverage-summary.json](coverage-summary.json).
 
 | Configuration | Library lines | Demo lines | All source lines | Source functions |
 | --- | ---: | ---: | ---: | ---: |
