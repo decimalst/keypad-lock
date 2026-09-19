@@ -1,0 +1,92 @@
+name: Rust
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 8 * * 1'
+permissions:
+  contents: read
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        features: [default, acoustic]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: 1.98.1
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - name: Default configuration
+        if: matrix.features == 'default'
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --release
+      - name: Acoustic configuration
+        if: matrix.features == 'acoustic'
+        run: |
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --release --all-features
+  embedded:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
+          targets: thumbv7em-none-eabihf
+      - run: |
+          cargo check --locked --lib --target thumbv7em-none-eabihf
+          cargo check --locked --lib --all-features --target thumbv7em-none-eabihf
+      - run: cargo doc --locked --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+  coverage:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features: [default, acoustic]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
+          components: llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
+      - if: matrix.features == 'default'
+        run: cargo llvm-cov --locked --fail-under-lines 99 --lcov --output-path coverage.lcov
+      - if: matrix.features == 'acoustic'
+        run: cargo llvm-cov --locked --all-features --fail-under-lines 99 --lcov --output-path coverage.lcov
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-${{ matrix.features }}
+          path: coverage.lcov
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: 1.98.1
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - run: cargo audit
+  stable:
+    name: Current stable compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: stable
+      - run: |
+          cargo +stable test --locked
+          cargo +stable test --locked --all-features

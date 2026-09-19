@@ -14,8 +14,21 @@
 //! - **No action spam:** the FSM tracks desired outputs and emits only *changes* (diff-based).
 //! - **Secret hygiene:** passcode buffers are `ZeroizeOnDrop` and never revealed via `Debug`.
 //! - **Persistence:** supports sealing/unsealing passcode via an injected pure `PasscodeSealer`
-//!   (so you don't store plaintext in NVRAM by default).
+//!   (encryption, metadata authentication and anti-rollback are adapter responsibilities).
+//!
+//! ```
+//! use keypad_lock_fsm::{Digit, Event, SecurityState, PersistedMode};
+//! let mut state = SecurityState::default();
+//! let boot_actions = state.output_actions(); // executor applies these before input
+//! assert_eq!(boot_actions.len(), 3);
+//! for digit in [1, 2, 3] {
+//!     state = state.next(Event::Keypress(Digit::new(digit).unwrap())).0;
+//! }
+//! state = state.next(Event::Enter).0;
+//! assert_eq!(state.mode(), PersistedMode::Locked);
+//! ```
 
+#![no_std]
 #![forbid(unsafe_code)]
 
 use core::time::Duration;
@@ -38,16 +51,10 @@ pub const UNLOCKED_DURATION: Duration = Duration::from_secs(10);
 pub const ALARM_DURATION: Duration = Duration::from_secs(5);
 
 // -----------------------------
-// Policy toggles (explicit)
+// Fixed policy (explicit)
 // -----------------------------
 
-/// If `true`, opening the door while in `Locked` mode triggers `Alarm`.
-///
-/// This is a tamper-response policy: on many systems the door should not be able to open while locked
-/// unless the lock is bypassed or the sensor is spoofed.
-///
-/// If `false`, the FSM treats `DoorSensorChanged(Open)` while locked as a sensor anomaly and keeps
-/// the system locked with alarm off.
+/// The fixed intrusion policy: opening a locked door raises an alarm.
 pub const ALARM_ON_DOOR_OPEN_WHEN_LOCKED: bool = true;
 
 /// MFA timeout when `acoustic_unlock` is enabled.
@@ -89,10 +96,17 @@ impl<const N: usize> Actions<N> {
         }
     }
 
+    /// Append an internal action, asserting that capacity is sufficient.
+    ///
+    /// # Panics
+    /// Panics in all build profiles if the action buffer is full.
     #[must_use]
     pub fn push_debug(&mut self, a: Action) -> bool {
         let ok = self.push(a);
-        debug_assert!(ok, "Actions overflow: increase MAX_ACTIONS or reduce emitted actions");
+        assert!(
+            ok,
+            "Actions overflow: increase MAX_ACTIONS or reduce emitted actions"
+        );
         ok
     }
 
@@ -136,7 +150,7 @@ impl<'a, const N: usize> IntoIterator for &'a Actions<N> {
     >;
 
     fn into_iter(self) -> Self::IntoIter {
-        fn keep<'a>(x: &'a Option<Action>) -> Option<&'a Action> {
+        fn keep(x: &Option<Action>) -> Option<&Action> {
             x.as_ref()
         }
         self.buf[..self.len].iter().filter_map(keep as fn(_) -> _)
@@ -192,7 +206,7 @@ pub enum DoorPhysicalState {
 }
 
 /// External input to the FSM.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Event {
     /// A keypad digit was pressed.
     Keypress(Digit),
@@ -209,6 +223,22 @@ pub enum Event {
     /// Optional MFA: the measured audio frequency (Hz) from an external sensor.
     #[cfg(feature = "acoustic_unlock")]
     AudioFrequency(u32),
+}
+
+impl core::fmt::Debug for Event {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Keypress(_) => f.write_str("Keypress([REDACTED])"),
+            Self::Enter => f.write_str("Enter"),
+            Self::Clear => f.write_str("Clear"),
+            Self::TimerTick(dt) => f.debug_tuple("TimerTick").field(dt).finish(),
+            Self::DoorSensorChanged(door) => {
+                f.debug_tuple("DoorSensorChanged").field(door).finish()
+            }
+            #[cfg(feature = "acoustic_unlock")]
+            Self::AudioFrequency(_) => f.write_str("AudioFrequency([REDACTED])"),
+        }
+    }
 }
 
 /// Hardware effects to perform outside the FSM.
@@ -250,6 +280,7 @@ pub enum Feedback {
 pub struct PasscodeBuffer {
     digits: [u8; MAX_PASSCODE_LEN],
     len: u8, // 0..=MAX_PASSCODE_LEN
+    overflowed: bool,
 }
 
 impl Default for PasscodeBuffer {
@@ -257,6 +288,7 @@ impl Default for PasscodeBuffer {
         Self {
             digits: [0u8; MAX_PASSCODE_LEN],
             len: 0,
+            overflowed: false,
         }
     }
 }
@@ -280,6 +312,7 @@ impl PasscodeBuffer {
             self.len += 1;
             true
         } else {
+            self.overflowed = true;
             false
         }
     }
@@ -288,6 +321,7 @@ impl PasscodeBuffer {
     pub fn clear(&mut self) {
         self.digits.zeroize();
         self.len = 0;
+        self.overflowed = false;
     }
 
     pub fn len(&self) -> usize {
@@ -305,11 +339,11 @@ impl PasscodeBuffer {
         digits_eq & len_eq
     }
 
-    /// Constant-time style match requiring non-empty input.
+    /// Constant-time style match requiring non-empty, non-overflowed input.
     pub fn matches(&self, other: &Self) -> bool {
         let eq = self.ct_eq(other);
         let non_empty = self.len.ct_ne(&0u8);
-        bool::from(eq & non_empty)
+        bool::from(eq & non_empty) & !self.overflowed & !other.overflowed
     }
 
     /// For sealing/persistence only: copy out the fixed buffer + len.
@@ -339,6 +373,7 @@ impl PasscodeBuffer {
         Some(Self {
             digits: normalized,
             len,
+            overflowed: false,
         })
     }
 }
@@ -381,7 +416,7 @@ pub enum PersistedMode {
 }
 
 impl<const BLOB_LEN: usize> PersistedState<BLOB_LEN> {
-    pub const VERSION: u8 = 2;
+    pub const VERSION: u8 = 3;
 
     /// Strict validation of invariant combinations. This prevents impossible states from being restored.
     pub fn validate_strict(&self) -> bool {
@@ -405,7 +440,7 @@ impl<const BLOB_LEN: usize> PersistedState<BLOB_LEN> {
             #[cfg(feature = "acoustic_unlock")]
             PersistedMode::PendingAudio => self.failed_attempts == 0,
             PersistedMode::Unlocked => self.failed_attempts == 0,
-            PersistedMode::Alarm => self.failed_attempts == 0,
+            PersistedMode::Alarm => self.failed_attempts < LOCKOUT_THRESHOLD,
         }
     }
 }
@@ -434,7 +469,9 @@ impl Outputs {
 /// Secret-bearing internal mode.
 #[derive(Debug)]
 enum Mode {
-    Setup { buffer: PasscodeBuffer },
+    Setup {
+        buffer: PasscodeBuffer,
+    },
 
     Locked {
         passcode: PasscodeBuffer,
@@ -442,10 +479,16 @@ enum Mode {
         failed_attempts: u8,
     },
 
-    Lockout { passcode: PasscodeBuffer, elapsed: Duration },
+    Lockout {
+        passcode: PasscodeBuffer,
+        elapsed: Duration,
+    },
 
     #[cfg(feature = "acoustic_unlock")]
-    PendingAudio { passcode: PasscodeBuffer, elapsed: Duration },
+    PendingAudio {
+        passcode: PasscodeBuffer,
+        elapsed: Duration,
+    },
 
     Unlocked {
         passcode: PasscodeBuffer,
@@ -453,7 +496,11 @@ enum Mode {
         door: DoorPhysicalState,
     },
 
-    Alarm { passcode: PasscodeBuffer, elapsed: Duration },
+    Alarm {
+        passcode: PasscodeBuffer,
+        elapsed: Duration,
+        failed_attempts: u8,
+    },
 }
 
 /// Public FSM: mode + last desired outputs.
@@ -496,9 +543,34 @@ impl SecurityState {
         acts
     }
 
+    /// Current mode, without exposing secret buffers or relying on `Debug` formatting.
+    pub fn mode(&self) -> PersistedMode {
+        match &self.mode {
+            Mode::Setup { .. } => PersistedMode::Setup,
+            Mode::Locked { .. } => PersistedMode::Locked,
+            Mode::Lockout { .. } => PersistedMode::Lockout,
+            #[cfg(feature = "acoustic_unlock")]
+            Mode::PendingAudio { .. } => PersistedMode::PendingAudio,
+            Mode::Unlocked { .. } => PersistedMode::Unlocked,
+            Mode::Alarm { .. } => PersistedMode::Alarm,
+        }
+    }
+
+    /// Complete desired outputs. Apply on boot or after an executor reconnects.
+    /// Ordinary transitions emit differences only; they do not acknowledge hardware success.
+    #[must_use]
+    pub fn output_actions(&self) -> Actions<MAX_ACTIONS> {
+        actions![
+            Action::SetDoorLock(self.out.door_locked),
+            Action::SoundAlarm(self.out.alarm_on),
+            Action::UpdateDisplayLen(self.out.display_len),
+        ]
+    }
+
     /// Create a persistence snapshot suitable for writing to EEPROM/NVRAM.
     ///
-    /// Uses the provided `sealer` to avoid plaintext storage.
+    /// The caller must authenticate the entire snapshot, protect keys and prevent rollback.
+    /// `PasscodeSealer` alone protects only the PIN blob. Setup input is discarded.
     #[must_use]
     pub fn snapshot_with<const B: usize, S: PasscodeSealer<B>>(
         &self,
@@ -510,7 +582,12 @@ impl SecurityState {
                 passcode,
                 guess: _,
                 failed_attempts,
-            } => (PersistedMode::Locked, passcode, *failed_attempts, Duration::ZERO),
+            } => (
+                PersistedMode::Locked,
+                passcode,
+                *failed_attempts,
+                Duration::ZERO,
+            ),
             Mode::Lockout { passcode, elapsed } => (
                 PersistedMode::Lockout,
                 passcode,
@@ -521,11 +598,22 @@ impl SecurityState {
             Mode::PendingAudio { passcode, elapsed } => {
                 (PersistedMode::PendingAudio, passcode, 0, *elapsed)
             }
-            Mode::Unlocked { passcode, elapsed, .. } => (PersistedMode::Unlocked, passcode, 0, *elapsed),
-            Mode::Alarm { passcode, elapsed } => (PersistedMode::Alarm, passcode, 0, *elapsed),
+            Mode::Unlocked {
+                passcode, elapsed, ..
+            } => (PersistedMode::Unlocked, passcode, 0, *elapsed),
+            Mode::Alarm {
+                passcode,
+                elapsed,
+                failed_attempts,
+            } => (PersistedMode::Alarm, passcode, *failed_attempts, *elapsed),
         };
 
-        let (digits, len) = passcode_buf.raw_parts();
+        // Setup input is transient, never a committed credential. Restart enrollment on reboot.
+        let (digits, len) = if mode_tag == PersistedMode::Setup {
+            ([0; MAX_PASSCODE_LEN], 0)
+        } else {
+            passcode_buf.raw_parts()
+        };
         let passcode_blob = sealer.seal(digits, len);
 
         let elapsed_ms = elapsed.as_millis().min(u32::MAX as u128) as u32;
@@ -548,11 +636,14 @@ impl SecurityState {
         door_now: DoorPhysicalState,
     ) -> Option<(Self, Actions<MAX_ACTIONS>)> {
         let state = Self::restore_with(sealer, snapshot)?;
-        let (next, acts) = state.next(Event::DoorSensorChanged(door_now));
-        Some((next, acts))
+        let (next, _) = state.next(Event::DoorSensorChanged(door_now));
+        let actions = next.output_actions();
+        Some((next, actions))
     }
 
     /// Restore from a persisted snapshot using a sealer.
+    /// Prefer `restore_primed_with` at boot. This low-level method cannot know physical
+    /// outputs and inhibits automatic relocking of an unlocked state until a closed sensor event.
     pub fn restore_with<const B: usize, S: PasscodeSealer<B>>(
         sealer: &S,
         snapshot: PersistedState<B>,
@@ -563,6 +654,12 @@ impl SecurityState {
 
         let (digits, len) = sealer.unseal(snapshot.passcode_blob)?;
         let passcode = PasscodeBuffer::from_raw_parts(digits, len)?;
+        if snapshot.mode != PersistedMode::Setup && passcode.len() < MIN_PASSCODE_LEN {
+            return None;
+        }
+        if snapshot.mode == PersistedMode::Setup && !passcode.is_empty() {
+            return None;
+        }
         let elapsed = Duration::from_millis(snapshot.elapsed_ms as u64);
 
         let mode = match snapshot.mode {
@@ -578,13 +675,20 @@ impl SecurityState {
             PersistedMode::Unlocked => Mode::Unlocked {
                 passcode,
                 elapsed,
-                door: DoorPhysicalState::Closed, // best-effort; will correct on next sensor event
+                door: DoorPhysicalState::Open, // unknown: inhibit timed relock until a live closed reading
             },
-            PersistedMode::Alarm => Mode::Alarm { passcode, elapsed },
+            PersistedMode::Alarm => Mode::Alarm {
+                passcode,
+                elapsed,
+                failed_attempts: snapshot.failed_attempts,
+            },
         };
 
         // Restore to safe posture (locked, alarm off, display cleared).
-        Some(Self { mode, out: Outputs::new() })
+        Some(Self {
+            mode,
+            out: Outputs::new(),
+        })
     }
 
     /// Pure state transition. Emits *only* output changes + explicit feedback actions.
@@ -622,7 +726,9 @@ impl SecurityState {
                 set_alarm(false);
             }
             (Mode::Setup { buffer }, Enter) => {
-                if buffer.len() >= MIN_PASSCODE_LEN {
+                if buffer.overflowed {
+                    let _ = acts.push_debug(Action::Feedback(Feedback::BufferFull));
+                } else if buffer.len() >= MIN_PASSCODE_LEN {
                     let passcode = core::mem::take(buffer);
                     self.mode = Mode::Locked {
                         passcode,
@@ -733,22 +839,25 @@ impl SecurityState {
                     }
                 }
             }
-            (Mode::Locked { passcode, guess, .. }, DoorSensorChanged(DoorPhysicalState::Open)) => {
-                // Explicit tamper-response policy: door opened while locked triggers alarm if enabled.
-                // If disabled, treat as a sensor anomaly and remain locked (alarm off).
+            (
+                Mode::Locked {
+                    passcode,
+                    guess,
+                    failed_attempts,
+                },
+                DoorSensorChanged(DoorPhysicalState::Open),
+            ) => {
+                // Intrusion preserves the retry budget; an alarm must not grant new guesses.
                 guess.clear();
                 set_display(0);
                 set_lock(true);
-                if ALARM_ON_DOOR_OPEN_WHEN_LOCKED {
-                    let passcode = core::mem::take(passcode);
-                    self.mode = Mode::Alarm {
-                        passcode,
-                        elapsed: Duration::ZERO,
-                    };
-                    set_alarm(true);
-                } else {
-                    set_alarm(false);
-                }
+                let passcode = core::mem::take(passcode);
+                self.mode = Mode::Alarm {
+                    passcode,
+                    elapsed: Duration::ZERO,
+                    failed_attempts: *failed_attempts,
+                };
+                set_alarm(true);
             }
             (Mode::Locked { .. }, DoorSensorChanged(DoorPhysicalState::Closed)) => {
                 set_lock(true);
@@ -812,25 +921,16 @@ impl SecurityState {
             // MODE 4: PENDING AUDIO (MFA)
             // -----------------
             #[cfg(feature = "acoustic_unlock")]
-            (Mode::PendingAudio { passcode, .. }, AudioFrequency(freq)) => {
-                if verify_audio_challenge(passcode, freq) {
-                    let passcode = core::mem::take(passcode);
-                    self.mode = Mode::Unlocked {
-                        passcode,
-                        elapsed: Duration::ZERO,
-                        door: DoorPhysicalState::Closed,
-                    };
-                    set_lock(false);
-                    set_alarm(false);
-                } else {
-                    let passcode = core::mem::take(passcode);
-                    self.mode = Mode::Alarm {
-                        passcode,
-                        elapsed: Duration::ZERO,
-                    };
-                    set_lock(true);
-                    set_alarm(true);
-                }
+            (Mode::PendingAudio { passcode, .. }, AudioFrequency(_)) => {
+                // Deliberately fail closed: a frequency is not an authenticated factor.
+                let passcode = core::mem::take(passcode);
+                self.mode = Mode::Alarm {
+                    passcode,
+                    elapsed: Duration::ZERO,
+                    failed_attempts: 0,
+                };
+                set_lock(true);
+                set_alarm(true);
                 set_display(0);
             }
             #[cfg(feature = "acoustic_unlock")]
@@ -854,7 +954,18 @@ impl SecurityState {
                 }
             }
             #[cfg(feature = "acoustic_unlock")]
-            (Mode::PendingAudio { .. }, DoorSensorChanged(_)) => {
+            (Mode::PendingAudio { passcode, .. }, DoorSensorChanged(DoorPhysicalState::Open)) => {
+                let passcode = core::mem::take(passcode);
+                self.mode = Mode::Alarm {
+                    passcode,
+                    elapsed: Duration::ZERO,
+                    failed_attempts: 0,
+                };
+                set_lock(true);
+                set_alarm(true);
+            }
+            #[cfg(feature = "acoustic_unlock")]
+            (Mode::PendingAudio { .. }, DoorSensorChanged(DoorPhysicalState::Closed)) => {
                 set_lock(true);
                 set_alarm(false);
             }
@@ -877,7 +988,14 @@ impl SecurityState {
             // -----------------
             // MODE 5: UNLOCKED
             // -----------------
-            (Mode::Unlocked { passcode, elapsed, door }, TimerTick(dt)) => {
+            (
+                Mode::Unlocked {
+                    passcode,
+                    elapsed,
+                    door,
+                },
+                TimerTick(dt),
+            ) => {
                 let new_elapsed = add_duration_saturating(*elapsed, dt);
                 *elapsed = new_elapsed;
 
@@ -905,7 +1023,14 @@ impl SecurityState {
                     set_alarm(false);
                 }
             }
-            (Mode::Unlocked { passcode, elapsed, door }, DoorSensorChanged(new_door)) => {
+            (
+                Mode::Unlocked {
+                    passcode,
+                    elapsed,
+                    door,
+                },
+                DoorSensorChanged(new_door),
+            ) => {
                 *door = new_door;
 
                 if *elapsed >= UNLOCKED_DURATION && new_door == DoorPhysicalState::Closed {
@@ -944,7 +1069,14 @@ impl SecurityState {
             // -----------------
             // MODE 6: ALARM
             // -----------------
-            (Mode::Alarm { passcode, elapsed }, TimerTick(dt)) => {
+            (
+                Mode::Alarm {
+                    passcode,
+                    elapsed,
+                    failed_attempts,
+                },
+                TimerTick(dt),
+            ) => {
                 let new_elapsed = add_duration_saturating(*elapsed, dt);
                 *elapsed = new_elapsed;
 
@@ -953,7 +1085,7 @@ impl SecurityState {
                     self.mode = Mode::Locked {
                         passcode,
                         guess: PasscodeBuffer::default(),
-                        failed_attempts: 0,
+                        failed_attempts: *failed_attempts,
                     };
                     set_display(0);
                     set_lock(true);
@@ -993,13 +1125,20 @@ impl SecurityState {
     }
 }
 
-// -----------------------------
-// MFA stub
-// -----------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-// NOTE: Never return true without authenticated cryptographic proof.
-// This must NOT be a simple "freq near passcode" logic in production.
-#[cfg(feature = "acoustic_unlock")]
-fn verify_audio_challenge(_p: &PasscodeBuffer, _freq: u32) -> bool {
-    false
+    #[test]
+    fn clear_erases_the_actual_previously_populated_buffer() {
+        let mut buffer = PasscodeBuffer::default();
+        for _ in 0..MAX_PASSCODE_LEN {
+            assert!(buffer.push(Digit::new(9).unwrap()));
+        }
+        assert!(!buffer.push(Digit::new(8).unwrap()));
+        buffer.clear();
+        assert_eq!(buffer.digits, [0; MAX_PASSCODE_LEN]);
+        assert_eq!(buffer.len, 0);
+        assert!(!buffer.overflowed);
+    }
 }
